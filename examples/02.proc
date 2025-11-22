@@ -1,0 +1,23 @@
+#!/usr/bin/env proc
+
+proc fizzbuzz(x) {
+	if x % 15 == 0 {
+		PutChar(70); # F
+		PutChar(66); # B
+	} else if x % 3 == 0 {
+		PutChar(70); # F
+	} else if x % 5 == 0 {
+		PutChar(66); # B
+	} else {
+		PutInt(x);
+	}
+	PutChar(10); # newline
+}
+
+proc main() {
+	int i = 1;
+	while i <= 100 {
+		fizzbuzz(i);
+		i += 1;
+	}
+}

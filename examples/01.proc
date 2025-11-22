@@ -1,0 +1,16 @@
+#!/usr/bin/env proc
+
+proc main() {
+	int n = 5, i;
+	int s[n];
+	s[0] = 104;
+	s[1] = 101;
+	s[2] = 108;
+	s[3] = 108;
+	s[4] = 111;
+	while i < 5 {
+		PrintChar(s[i]);
+		i += 1;
+	}
+	PrintChar(10); # newline
+}
