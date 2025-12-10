@@ -171,22 +171,22 @@ struct stmt {
 
 /* globals */
 
-static char *argv0, *script_path;
-static FILE *script_file;
+char *argv0, *script_path;
+FILE *script_file;
 
-static char parse_data[PARSE_DATA_SIZE];
-static struct bumpalloc parse_alloc;
+char parse_data[PARSE_DATA_SIZE];
+struct bumpalloc parse_alloc;
 
-static char eval_data[EVAL_DATA_SIZE];
-static struct bumpalloc eval_alloc;
+char eval_data[EVAL_DATA_SIZE];
+struct bumpalloc eval_alloc;
 
-static long words[WORDS_SIZE];
-static struct bumpalloc word_alloc;
+long words[WORDS_SIZE];
+struct bumpalloc word_alloc;
 
-static struct token tok = {TOK_START};
-static struct token tok_undo;
+struct token tok = {TOK_START};
+struct token tok_undo;
 
-static struct ast ast;
+struct ast ast;
 
 /* implementation */
 
@@ -329,6 +329,37 @@ get_token_str(struct token t)
 	}
 }
 
+/* comment is # */
+int
+skip_comment(int *line, int *col, int c)
+{
+	if (c != 35)
+		return c;
+	while (c != 10) {
+		if ((c = fgetc(script_file)) == EOF)
+			return c;
+		++*col;
+	}
+	++*line;
+	*col = 0;
+	return c;
+}
+
+int
+skip_whitespace(int *line, int *col, int c)
+{
+	while (IS_SPACE(c)) {
+		if (c == 10) {
+			++*line;
+			*col = 0;
+		}
+		if ((c = fgetc(script_file)) == EOF)
+			return c;
+		++*col;
+	}
+	return c;
+}
+
 /* tokenizer/lexer */
 void
 next_token(void)
@@ -354,45 +385,30 @@ next_token(void)
 	col = tok.col_end;
 	tok.tag = TOK_NULL;
 tokenize:
-	c = fgetc(script_file);
-	if (c == EOF)
+	if ((c = fgetc(script_file)) == EOF)
 		goto end;
 	if (!line)
 		line = 1;
 	++col;
-skip_comment:
-	if (c == 35) { /* # comment */
-		while (c != 10) {
-			c = fgetc(script_file);
-			if (c == EOF)
-				goto end;
-			++col;
-		}
-		++line;
-		col = 0;
+	if (c == 35) { /* comment before whitespace */
+		if ((c = skip_comment(&line, &col, c)) == EOF)
+			goto end;
 		goto tokenize;
 	}
-	while (IS_SPACE(c)) {
-		if (c == 10) {
-			++line;
-			col = 0;
-		}
-		c = fgetc(script_file);
-		if (c == EOF)
+	if ((c = skip_whitespace(&line, &col, c)) == EOF)
+		goto end;
+	if (c == 35) { /* comment after whitespace */
+		if ((c = skip_comment(&line, &col, c)) == EOF)
 			goto end;
-		++col;
+		goto tokenize;
 	}
-	if (c == 35)
-		goto skip_comment;
 	tok.line = line;
 	tok.col = col;
 	if (IS_DIGIT(c)) {
 		for (i = 0; IS_DIGIT(c) && i < LENGTH(digits) - 1;) {
 			digits[i++] = c;
-			c = fgetc(script_file);
-			if (c == 95) { /* _ separator */
-				c = fgetc(script_file);
-				if (c == 95 || !IS_DIGIT(c)) {
+			if ((c = fgetc(script_file)) == 95) { /* _ separator */
+				if ((c = fgetc(script_file)) == 95 || !IS_DIGIT(c)) {
 					digits[i] = 0;
 					goto invalid_decimal;
 				}
@@ -461,8 +477,7 @@ invalid_decimal:
 		goto end_consuming;
 	case 38:
 		tok.tag = TOK_AMPERSAND;
-		c = fgetc(script_file);
-		if (c == 38) {
+		if ((c = fgetc(script_file)) == 38) {
 			tok.tag = TOK_AND;
 			++col;
 			goto end_consuming;
@@ -470,8 +485,7 @@ invalid_decimal:
 		goto end;
 	case 43:
 		tok.tag = TOK_PLUS;
-		c = fgetc(script_file);
-		if (c == 61) {
+		if ((c = fgetc(script_file)) == 61) {
 			tok.tag = TOK_ASSIGN_ADD;
 			++col;
 			goto end_consuming;
@@ -479,8 +493,7 @@ invalid_decimal:
 		goto end;
 	case 45:
 		tok.tag = TOK_MINUS;
-		c = fgetc(script_file);
-		if (c == 61) {
+		if ((c = fgetc(script_file)) == 61) {
 			tok.tag = TOK_ASSIGN_SUB;
 			++col;
 			goto end_consuming;
@@ -488,8 +501,7 @@ invalid_decimal:
 		goto end;
 	case 33:
 		tok.tag = TOK_EXCLAM;
-		c = fgetc(script_file);
-		if (c == 61) {
+		if ((c = fgetc(script_file)) == 61) {
 			tok.tag = TOK_NOT_EQUALS;
 			++col;
 			goto end_consuming;
@@ -497,8 +509,7 @@ invalid_decimal:
 		goto end;
 	case 37:
 		tok.tag = TOK_PERCENT;
-		c = fgetc(script_file);
-		if (c == 61) {
+		if ((c = fgetc(script_file)) == 61) {
 			tok.tag = TOK_ASSIGN_REM;
 			++col;
 			goto end_consuming;
@@ -506,8 +517,7 @@ invalid_decimal:
 		goto end;
 	case 47:
 		tok.tag = TOK_SLASH;
-		c = fgetc(script_file);
-		if (c == 61) {
+		if ((c = fgetc(script_file)) == 61) {
 			tok.tag = TOK_ASSIGN_DIV;
 			++col;
 			goto end_consuming;
@@ -515,8 +525,7 @@ invalid_decimal:
 		goto end;
 	case 42:
 		tok.tag = TOK_ASTERISK;
-		c = fgetc(script_file);
-		if (c == 61) {
+		if ((c = fgetc(script_file)) == 61) {
 			tok.tag = TOK_ASSIGN_MUL;
 			++col;
 			goto end_consuming;
@@ -524,8 +533,7 @@ invalid_decimal:
 		goto end;
 	case 62:
 		tok.tag = TOK_GREATER;
-		c = fgetc(script_file);
-		if (c == 61) {
+		if ((c = fgetc(script_file)) == 61) {
 			tok.tag = TOK_GREATER_EQUALS;
 			++col;
 			goto end_consuming;
@@ -533,8 +541,7 @@ invalid_decimal:
 		goto end;
 	case 60:
 		tok.tag = TOK_LESS;
-		c = fgetc(script_file);
-		if (c == 61) {
+		if ((c = fgetc(script_file)) == 61) {
 			tok.tag = TOK_LESS_EQUALS;
 			++col;
 			goto end_consuming;
@@ -542,8 +549,7 @@ invalid_decimal:
 		goto end;
 	case 61:
 		tok.tag = TOK_ASSIGN;
-		c = fgetc(script_file);
-		if (c == 61) {
+		if ((c = fgetc(script_file)) == 61) {
 			tok.tag = TOK_EQUALS;
 			++col;
 			goto end_consuming;
@@ -572,44 +578,86 @@ undo_token(void)
 }
 
 struct expr *
-parse_expr(void)
+parse_expr(int lastprec)
 {
 	/* XXX */
 	return NULL;
 }
 
 struct stmt *
-parse_decl(void)
+parse_decl(struct stmt **last)
 {
-	struct stmt *decl;
+	struct stmt *root = NULL, **decl;
 
-	decl = alloc(&parse_alloc, sizeof(*decl));
-	decl->tag = STMT_DECL;
-	decl->tok = tok;
-	next_token();
-	if (tok.tag != TOK_NAME)
-		parse_die("expected a name, but got `%s`", get_token_str(tok));
-	decl->u.decl.name = tok.u.name;
-	next_token();
-	if (tok.tag == TOK_EQUALS) {
-		decl->u.decl.elems = parse_expr();
+	decl = &root;
+	while (1) {
+		*decl = alloc(&parse_alloc, sizeof(struct stmt));
+		(*decl)->tag = STMT_DECL;
+		(*decl)->tok = tok;
 		next_token();
-	} else if (tok.tag == TOK_BRACKET_L) {
-		decl->u.decl.expr = parse_expr();
+		if (tok.tag != TOK_NAME)
+			parse_die("expected a name, but got `%s`", get_token_str(tok));
+		(*decl)->u.decl.name = tok.u.name;
 		next_token();
-		if (tok.tag != TOK_BRACKET_R)
-			parse_die("expected `]`, but got `%s`", get_token_str(tok));
-		next_token();
+		if (tok.tag == TOK_EQUALS) {
+			(*decl)->u.decl.elems = parse_expr(0);
+			next_token();
+		} else if (tok.tag == TOK_BRACKET_L) {
+			(*decl)->u.decl.expr = parse_expr(0);
+			next_token();
+			if (tok.tag != TOK_BRACKET_R)
+				parse_die("expected `]`, but got `%s`", get_token_str(tok));
+			next_token();
+		}
+		if (tok.tag == TOK_SEMICOLON) {
+			*last = *decl;
+			return root;
+		} else if (tok.tag != TOK_COMMA) {
+			parse_die("expected `;` or `,`, but got `%s`", get_token_str(tok));
+		}
+		decl = &(*decl)->next;
+		/* handle next declaration */
 	}
-	if (tok.tag == TOK_SEMICOLON) {
-		return decl;
-	} else if (tok.tag == TOK_COMMA) {
-		decl->next = parse_decl();
-		decl->next->tok = decl->tok;
-		return decl;
+}
+
+void
+parse_assign(struct stmt **stmt)
+{
+	(*stmt)->u.ass.lhs = parse_expr(0);
+	next_token();
+	switch (tok.tag) {
+	case TOK_ASSIGN:
+		(*stmt)->tag = STMT_ASSIGN;
+		break;
+	case TOK_ASSIGN_ADD:
+		(*stmt)->tag = STMT_ASSIGN_ADD;
+		break;
+	case TOK_ASSIGN_SUB:
+		(*stmt)->tag = STMT_ASSIGN_SUB;
+		break;
+	case TOK_ASSIGN_MUL:
+		(*stmt)->tag = STMT_ASSIGN_MUL;
+		break;
+	case TOK_ASSIGN_DIV:
+		(*stmt)->tag = STMT_ASSIGN_DIV;
+		break;
+	case TOK_ASSIGN_REM:
+		(*stmt)->tag = STMT_ASSIGN_REM;
+		break;
+	default:
+		parse_die("expected `=`, `+=`, `-=`, `*=`, `/=` or `%=`, but got `%s`", get_token_str(tok));
 	}
-	parse_die("expected `;` or `,`, but got `%s`", get_token_str(tok));
-	assert(!"unexpected state");
+	(*stmt)->u.ass.rhs = parse_expr(0);
+	if (tok.tag != TOK_SEMICOLON)
+		parse_die("expected `;`, but got `%s`", get_token_str(tok));
+}
+
+void
+parse_call(struct stmt **stmt)
+{
+	(*stmt)->u.expr = parse_expr(0);
+	if ((*stmt)->u.expr->tag != EXPR_CALL)
+		parse_die("expected procedure call");
 }
 
 struct stmt *parse_stmt(void);
@@ -617,131 +665,131 @@ struct stmt *parse_stmt(void);
 struct stmt *
 parse_if(void)
 {
-	struct stmt *sel;
+	struct stmt *root = NULL, **sel;
 
-	sel = alloc(&parse_alloc, sizeof(*sel));
-	sel->tag = STMT_SELECT;
-	sel->tok = tok;
-	sel->u.sel.cond = parse_expr();
-	next_token();
-	if (tok.tag != TOK_BRACE_L)
-		parse_die("expected `{`, but got `%s`", get_token_str(tok));
-	sel->u.sel.ifbody = parse_stmt();
-	next_token();
-	if (tok.tag != TOK_BRACE_R)
-		parse_die("expected `}`, but got `%s`", get_token_str(tok));
-	next_token();
-	if (tok.tag == TOK_ELSE) {
+	sel = &root;
+	while (1) {
+		*sel = alloc(&parse_alloc, sizeof(struct stmt));
+		(*sel)->tag = STMT_SELECT;
+		(*sel)->tok = tok;
+		(*sel)->u.sel.cond = parse_expr(0);
 		next_token();
-		if (tok.tag == TOK_IF) {
-			sel->u.sel.elsebody = parse_if();
-			return sel;
-		} else if (tok.tag != TOK_BRACE_L) {
+		if (tok.tag != TOK_BRACE_L)
 			parse_die("expected `{`, but got `%s`", get_token_str(tok));
-		}
-		sel->u.sel.elsebody = parse_stmt();
+		(*sel)->u.sel.ifbody = parse_stmt();
 		next_token();
 		if (tok.tag != TOK_BRACE_R)
 			parse_die("expected `}`, but got `%s`", get_token_str(tok));
-	} else {
-		undo_token();
+		next_token();
+		if (tok.tag != TOK_ELSE) {
+			undo_token();
+			return root;
+		}
+		next_token();
+		if (tok.tag == TOK_BRACE_L) {
+			(*sel)->u.sel.elsebody = parse_stmt();
+			next_token();
+			if (tok.tag != TOK_BRACE_R)
+				parse_die("expected `}`, but got `%s`", get_token_str(tok));
+			return root;
+		} else if (tok.tag != TOK_IF) {
+			parse_die("expected `{` or `if`, but got `%s`", get_token_str(tok));
+		}
+		sel = &(*sel)->u.sel.elsebody;
+		/* handle else-if */
 	}
-	return sel;
 }
 
 struct stmt *
 parse_while(void)
 {
-	struct stmt *lp;
+	struct stmt *root = NULL;
 
-	lp = alloc(&parse_alloc, sizeof(*lp));
-	lp->tag = STMT_LOOP;
-	lp->tok = tok;
-	lp->u.lp.cond = parse_expr();
+	root = alloc(&parse_alloc, sizeof(struct stmt));
+	root->tag = STMT_LOOP;
+	root->tok = tok;
+	root->u.loop.cond = parse_expr(0);
 	next_token();
 	if (tok.tag != TOK_BRACE_L)
 		parse_die("expected `{`, but got `%s`", get_token_str(tok));
-	lp->u.lp.body = parse_stmt();
+	root->u.loop.body = parse_stmt();
 	next_token();
 	if (tok.tag != TOK_BRACE_R)
 		parse_die("expected `}`, but got `%s`", get_token_str(tok));
-	return lp;
-}
-
-struct stmt *
-parse_assign_or_call(void)
-{
-	struct stmt *stmt;
-
-	stmt = alloc(&parse_alloc, sizeof(*stmt));
-	next_token();
-	if (tok.tag != TOK_NAME)
-		parse_die("expected a name, but got `%s`", get_token_str(tok));
-	/* XXX */
-	return stmt;
+	return root;
 }
 
 struct stmt *
 parse_stmt(void)
 {
-	struct stmt *stmt, *st;
+	struct stmt *root = NULL, **stmt, *lastdecl;
 	int unclosedbraces = 0;
 
-	next_token();
-	switch (tok.tag) {
-	case TOK_BRACE_R:
-		undo_token();
-		return NULL;
-	case TOK_RETURN:
-		stmt = alloc(&parse_alloc, sizeof(*stmt));
-		stmt->tag = STMT_RETURN;
-		stmt->tok = tok;
+	stmt = &root;
+	while (1) {
 		next_token();
-		if (tok.tag == TOK_SEMICOLON)
-			return stmt;
-		undo_token();
-		stmt->u.expr = parse_expr();
-		next_token();
-		if (tok.tag != TOK_SEMICOLON)
-			parse_die("expected `;`, but got `%s`", get_token_str(tok));
-		/* ignore code after return: */
-		while (tok.tag != TOK_BRACE_R || unclosedbraces) {
-		        switch (tok.tag) {
-		        case TOK_BRACE_L:
-		                ++unclosedbraces;
-		                break;
-		        case TOK_BRACE_R:
-		                --unclosedbraces;
-		                break;
-		        case TOK_NULL:
-				parse_die("unexpected text after `return` statement");
-		        default:
-		                ;
-		        }
-		        next_token();
+		switch (tok.tag) {
+		case TOK_BRACE_R:
+			undo_token();
+			return root;
+		case TOK_RETURN:
+			*stmt = alloc(&parse_alloc, sizeof(struct stmt));
+			(*stmt)->tag = STMT_RETURN;
+			(*stmt)->tok = tok;
+			next_token();
+			if (tok.tag == TOK_SEMICOLON)
+				return root;
+			undo_token();
+			(*stmt)->u.expr = parse_expr(0);
+			next_token();
+			if (tok.tag != TOK_SEMICOLON)
+				parse_die("expected `;`, but got `%s`", get_token_str(tok));
+			/* ignore code after return: */
+			while (tok.tag != TOK_BRACE_R || unclosedbraces) {
+				switch (tok.tag) {
+				case TOK_BRACE_L:
+					++unclosedbraces;
+					break;
+				case TOK_BRACE_R:
+					--unclosedbraces;
+					break;
+				case TOK_NULL:
+					parse_die("unexpected text after `return` statement");
+				default:
+					;
+				}
+				next_token();
+			}
+			return root;
+		case TOK_INT_KW:
+			*stmt = parse_decl(&lastdecl);
+			stmt = &lastdecl->next;
+			break;
+		case TOK_IF:
+			*stmt = parse_if();
+			stmt = &(*stmt)->next;
+			break;
+		case TOK_WHILE:
+			*stmt = parse_while();
+			stmt = &(*stmt)->next;
+			break;
+		case TOK_NAME: /* assignment or call */
+			*stmt = alloc(&parse_alloc, sizeof(struct stmt));
+			(*stmt)->tok = tok;
+			next_token();
+			if (tok.tag == TOK_PAREN_L) {
+				parse_call(stmt);
+			} else {
+				undo_token();
+				parse_assign(stmt);
+			}
+			stmt = &(*stmt)->next;
+			break;
+		default:
+			parse_die("expected `}`, `return`, `int`, `if`, `while`, an assignment or a call, but got `%s`", get_token_str(tok));
+			assert(!"unexpected state");
 		}
-		return stmt;
-	case TOK_INT_KW:
-		stmt = parse_decl();
-		for (st = stmt; st->next; st = st->next); /* because int i_1, i_2, ..., i_n; */
-		st->next = parse_stmt();
-		return stmt;
-	case TOK_IF:
-		stmt = parse_if();
-		stmt->next = parse_stmt();
-		return stmt;
-	case TOK_WHILE:
-		stmt = parse_while();
-		stmt->next = parse_stmt();
-		return stmt;
-	case TOK_NAME: /* assignment or call */
-		undo_token();
-		stmt = parse_assign_or_call();
-		stmt->next = parse_stmt();
-		return stmt;
-	default:
-		parse_die("expected `}`, `return`, `int`, `if`, `while`, an assignment or a call, but got `%s`", get_token_str(tok));
-		assert(!"unexpected state");
+		/* handle next statement */
 	}
 }
 
@@ -760,10 +808,8 @@ parse_proc(void)
 	next_token();
 	if (tok.tag != TOK_PAREN_L)
 		parse_die("expected `(`, but got `%s`", get_token_str(tok));
-	while (1) {
-		next_token();
-		if (tok.tag == TOK_PAREN_R)
-			break;
+	next_token();
+	while (tok.tag != TOK_PAREN_R) {
 		if (tok.tag != TOK_NAME)
 			parse_die("expected `)` or a name, but got `%s`", get_token_str(tok));
 		param = alloc(&parse_alloc, sizeof(*param));
@@ -773,6 +819,7 @@ parse_proc(void)
 		if (proc->params)
 			param->next = proc->params;
 		proc->params = param;
+		next_token();
 	}
 	next_token();
 	if (tok.tag != TOK_BRACE_L)
@@ -787,7 +834,7 @@ parse_proc(void)
 void
 parse(void)
 {
-	struct stmt *decl;
+	struct stmt *decl, *lastdecl;
 	struct proc *proc;
 	int eof = 0;
 
@@ -799,9 +846,9 @@ parse(void)
 		next_token();
 		switch (tok.tag) {
 		case TOK_INT_KW:
-			decl = parse_decl();
+			decl = parse_decl(&lastdecl);
 			if (ast.globals)
-				decl->next = ast.globals;
+				lastdecl->next = ast.globals;
 			ast.globals = decl;
 			break;
 		case TOK_PROC:
@@ -837,10 +884,23 @@ main(int argc, char **argv)
 	}
 	script_path = argv[1];
 	parse_alloc = bumpalloc_new(parse_data, sizeof(parse_data));
+	if (!(script_file = fopen(script_path, "r")))
+		return 2;
+	fputs("TESTING TOKENIZER:\n", stdout);
+	fputs("start-of-file", stdout);
+	while (tok.tag != TOK_NULL) {
+		next_token();
+		putchar(' ');
+		fputs(get_token_str(tok), stdout);
+	}
+	putchar('\n');
+	return 0;
+#if 0
 	eval_alloc = bumpalloc_new(eval_data, sizeof(eval_data));
 	word_alloc = bumpalloc_new(words, sizeof(words));
 	parse();
 	return eval(--argc, ++argv);
+#endif
 }
 
-/* 2025-12-09 -- public domain */
+/* 2025-12-10 -- public domain */
