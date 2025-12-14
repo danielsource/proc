@@ -34,7 +34,7 @@ Inspired by [_B_](https://web.archive.org/web/20240425202455/https://www.bell-la
 `examples` directory contains examples of programs in _proc_.
 
 
-# usage
+# Usage
 
 ```
 General: proc  FILE-TO-BE-INTERPRETED  [ARGUMENTS-PASSED-TO-FILE...]
@@ -43,7 +43,7 @@ Example: proc  ./addnums.proc  1 2 3
 ```
 
 
-# how to build (unix)
+# How to build (unix)
 
 `make`
 

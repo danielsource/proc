@@ -3,14 +3,14 @@
 proc main() {
 	int n = 5, i;
 	int s[n];
-	s[0] = 104;
-	s[1] = 101;
-	s[2] = 108;
-	s[3] = 108;
-	s[4] = 111;
+	s[0] = 'h';
+	s[1] = 'e';
+	s[2] = 'l';
+	s[3] = 'l';
+	s[4] = 'o';
 	while i < 5 {
 		PrintChar(s[i]);
 		i += 1;
 	}
-	PrintChar(10); # newline
+	PrintChar('\n');
 }

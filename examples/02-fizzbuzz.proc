@@ -2,16 +2,16 @@
 
 proc fizzbuzz(x) {
 	if x % 15 == 0 {
-		PutChar(70); # F
-		PutChar(66); # B
+		PutChar('F');
+		PutChar('B');
 	} else if x % 3 == 0 {
-		PutChar(70); # F
+		PutChar('F');
 	} else if x % 5 == 0 {
-		PutChar(66); # B
+		PutChar('B');
 	} else {
 		PutInt(x);
 	}
-	PutChar(10); # newline
+	PutChar('\n');
 }
 
 proc main() {

@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-#define VERSION "2025-12-12 -- https://github.com/danielsource/proc -- public domain"
+#define VERSION "WIP -- https://github.com/danielsource/proc -- public domain"
 #define TOKEN_BUF_SIZE (64)
 #define PARSE_DATA_SIZE (50l*1000*1000)
 #define EVAL_DATA_SIZE (50l*1000*1000)
@@ -16,6 +16,8 @@
 #define UNARY_PREC 6
 #define ALIGN sizeof(void *)
 #define LENGTH(x) ((int)(sizeof(x) / sizeof((x)[0])))
+
+/* assumes ASCII */
 #define IS_SPACE(c) (((c) >= 0 && (c) <= 32) || (c) == 127)
 #define IS_DIGIT(c) ((c) >= 48 && (c) <= 57)
 #define IS_ALPHA(c) (((c) >= 65 && (c) <= 90) || ((c) >= 97 && (c) <= 122))
@@ -150,7 +152,7 @@ enum stmt_tag {
 	STMT_ASSIGN_MUL,
 	STMT_ASSIGN_DIV,
 	STMT_ASSIGN_REM,
-	STMT_EXPR,
+	STMT_CALL,
 	STMT_SELECT,
 	STMT_LOOP
 };
@@ -183,7 +185,8 @@ long words[WORDS_SIZE];
 struct bumpalloc word_alloc;
 
 struct token tok = {TOK_START};
-struct token tok_undo;
+struct token tok_undo[2];
+int tok_undo_top = 0;
 
 struct ast ast;
 
@@ -246,29 +249,54 @@ parse_die(const char *msg, ...)
 }
 
 long
-str_to_int(const char *str)
+str_to_int(const char *digits)
 {
-	long n = 0, sign = 1, aux;
+	long n = 0, sign = 1, base = 10, digitval;
 	const char *s;
 
-	s = str;
-	if (s[0] == 43) { /* + */
+	s = digits;
+	if (*s == 43) { /* + */
 		++s;
-	} else if (s[0] == 45) { /* - */
+	} else if (*s == 45) { /* - */
 		sign = -1;
 		++s;
 	}
-	while (IS_DIGIT(s[0])) {
-		if (n > LONG_MAX / 10)
-			parse_die("decimal literal too large `%s` [A]", str);
-		n *= 10;
-		aux = s[0] - 48;
-		if (n > LONG_MAX - aux)
-			parse_die("decimal literal too large `%s` [B]", str);
-		n += aux;
+	if (*s == 48 && !IS_DIGIT(s[1])) { /* 0b..., 0o..., 0x... */
+		switch (s[1]) {
+		case 66: case 98: base = 2; break;
+		case 79: case 111: base = 8; break;
+		case 88: case 120: base = 16; break;
+		case 0:
+			return 0;
+		default:
+			goto invalid_int_lit;
+		}
+		s += 2;
+
+	}
+	while (*s) {
+		if (IS_DIGIT(*s))
+			digitval = *s - 48;
+		else if (base == 16 && *s >= 65 && *s <= 70) /* A-F */
+			digitval = *s - 65;
+		else if (base == 16 && *s >= 97 && *s <= 102) /* a-f */
+			digitval = *s - 97;
+		else
+			goto invalid_int_lit;
+		if (digitval >= base)
+			goto invalid_int_lit;
+		if (n > LONG_MAX / base)
+			parse_die("integer literal too large `%s` [A]", digits);
+		n *= base;
+		if (n > LONG_MAX - digitval)
+			parse_die("integer literal too large `%s` [B]", digits);
+		n += digitval;
 		++s;
 	}
 	return n * sign;
+invalid_int_lit:
+	parse_die("invalid integer literal `%s`", digits);
+	assert(!"unexpected state");
 }
 
 const char *
@@ -339,9 +367,10 @@ next_token(void)
 
 	if (tok.tag == TOK_NULL)
 		return;
-	else if (tok_undo.tag != TOK_NULL) {
-		tok = tok_undo;
-		memset(&tok_undo, 0, sizeof(tok_undo));
+	else if (tok_undo_top && tok_undo[tok_undo_top - 1].tag != TOK_NULL) {
+		tok = tok_undo[tok_undo_top - 1];
+		memset(&tok_undo[tok_undo_top - 1], 0, sizeof(*tok_undo));
+		--tok_undo_top;
 		return;
 	}
 	if (feof(script_file)) {
@@ -360,7 +389,7 @@ next_token(void)
 	++col;
 	while (1) {
 		while (IS_SPACE(c)) {
-			if (c == 10) { /* newline (10) */
+			if (c == 10) { /* newline */
 				++line;
 				col = 0;
 			}
@@ -382,16 +411,17 @@ next_token(void)
 		for (i = 0; IS_DIGIT(c) && i < LENGTH(digits) - 1;) {
 			digits[i++] = c;
 			if ((c = fgetc(script_file)) == 95) { /* _ separator */
+				++col;
 				if ((c = fgetc(script_file)) == 95 || !IS_DIGIT(c)) {
 					digits[i] = 0;
-					goto invalid_decimal;
+					goto invalid_int_lit;
 				}
 			}
 		}
 		digits[i] = 0;
 		if (IS_IDENT1(c) || i == LENGTH(digits) - 1)
-invalid_decimal:
-			parse_die("invalid decimal literal `%s...`", digits);
+invalid_int_lit:
+			parse_die("invalid integer literal `%s...`", digits);
 		tok.tag = TOK_INT;
 		tok.u.i = str_to_int(digits);
 		col += i - 1;
@@ -426,6 +456,35 @@ invalid_decimal:
 		goto end;
 	}
 	switch (c) {
+	case 39: /* 'c' character literal */
+		c = fgetc(script_file);
+		if (c == 92) { /* \<escape> */
+			c = fgetc(script_file);
+			switch (c) {
+			case 97: i = 7; break; /* \a */
+			case 98: i = 8; break; /* \b */
+			case 116: i = 9; break; /* \t */
+			case 110: i = 10; break; /* \n */
+			case 114: i = 13; break; /* \r */
+			case 101: i = 27; break; /* \e */
+			case 92: i = 92; break; /* \\ */
+			default:
+				goto invalid_char_lit;
+			}
+			++col;
+		} else if (c != 39 && c >= 32 && c <= 126) { /* printable */
+			i = c;
+		} else {
+			goto invalid_char_lit;
+		}
+		c = fgetc(script_file);
+		if (c != 39)
+invalid_char_lit:
+			parse_die("invalid character literal");
+		tok.tag = TOK_INT;
+		tok.u.i = i;
+		col += 2;
+		goto end_consuming;
 	case 40: tok.tag = TOK_PAREN_L; goto end_consuming;
 	case 41: tok.tag = TOK_PAREN_R; goto end_consuming;
 	case 91: tok.tag = TOK_BRACKET_L; goto end_consuming;
@@ -524,7 +583,9 @@ invalid_decimal:
 		goto end;
 	default:
 unexpected_char:
-		if (c > 127)
+		if (c == EOF)
+			parse_die("unexpected end-of-file");
+		else if (c > 127)
 			parse_die("script contains non-ASCII character %d;\n"
 				  "... this can happen when copying text from websites, PDFs, etc.",
 				  c);
@@ -543,8 +604,10 @@ end_consuming:
 void
 undo_token(void)
 {
-	assert(tok_undo.tag == TOK_NULL);
-	tok_undo = tok;
+	assert(tok_undo_top < LENGTH(tok_undo));
+	assert(tok_undo[tok_undo_top].tag == TOK_NULL);
+	++tok_undo_top;
+	tok_undo[tok_undo_top - 1] = tok;
 }
 
 struct expr *parse_expr(int minprec);
@@ -667,7 +730,7 @@ parse_expr(int minprec)
 	return e;
 }
 
-void
+struct stmt *
 parse_decl(struct stmt **decl)
 {
 	while (1) {
@@ -689,7 +752,7 @@ parse_decl(struct stmt **decl)
 			next_token();
 		}
 		if (tok.tag == TOK_SEMICOLON) {
-			return;
+			return *decl;
 		} else if (tok.tag != TOK_COMMA) {
 			parse_die("expected `;` or `,`, but got `%s`", get_token_str(tok));
 		}
@@ -834,7 +897,7 @@ parse_stmt(void)
 			undo_token();
 			return root;
 		case TOK_INT_KW:
-			parse_decl(stmt);
+			stmt = &parse_decl(stmt)->next; /* int a, ..., z; (get "z") */
 			break;
 		case TOK_IF:
 			*stmt = parse_if();
@@ -849,6 +912,10 @@ parse_stmt(void)
 			(*stmt)->tok = tok;
 			next_token();
 			if (tok.tag == TOK_PAREN_L) {
+				tok_undo[0] = tok;
+				tok_undo[1] = (*stmt)->tok;
+				tok_undo_top = 2;
+				(*stmt)->tag = STMT_CALL;
 				(*stmt)->u.expr = parse_expr(0);
 				if ((*stmt)->u.expr->tag != EXPR_CALL)
 					parse_die("expected procedure call statement",
@@ -857,7 +924,9 @@ parse_stmt(void)
 				if (tok.tag != TOK_SEMICOLON)
 					parse_die("expected `;`, but got `%s`", get_token_str(tok));
 			} else {
-				undo_token();
+				tok_undo[0] = tok;
+				tok_undo[1] = (*stmt)->tok;
+				tok_undo_top = 2;
 				parse_assign(stmt);
 			}
 			stmt = &(*stmt)->next;
@@ -868,6 +937,28 @@ parse_stmt(void)
 		}
 		/* handle next statement */
 	}
+}
+
+struct stmt *
+get_decl(struct stmt *decls, const char *name)
+{
+	struct stmt *decl;
+
+	for (decl = decls; decl; decl = decl->next)
+		if (!strcmp(decl->tok.u.name, name))
+			return decl;
+	return NULL;
+}
+
+struct proc *
+get_proc(struct proc *procs, const char *name)
+{
+	struct proc *proc;
+
+	for (proc = procs; proc; proc = proc->next)
+		if (!strcmp(proc->tok.u.name, name))
+			return proc;
+	return NULL;
 }
 
 struct proc *
@@ -891,6 +982,9 @@ parse_proc(void)
 		param = alloc(&parse_alloc, sizeof(*param));
 		param->tag = STMT_DECL;
 		param->tok = tok;
+		if (get_decl(proc->params, tok.u.name))
+			parse_die("procedure `%s` contains duplicated parameter `%s`",
+				 proc->tok.u.name, tok);
 		if (proc->params)
 			param->next = proc->params;
 		proc->params = param;
@@ -913,7 +1007,7 @@ parse_proc(void)
 void
 parse(void)
 {
-	struct stmt *decl;
+	struct stmt **decl;
 	struct proc *proc;
 	int eof = 0;
 
@@ -921,17 +1015,18 @@ parse(void)
 	if (!script_file)
 		parse_die("cannot open script to read");
 	memset(&ast, 0, sizeof(ast));
+	decl = &ast.globals;
 	while (!eof) {
 		next_token();
 		switch (tok.tag) {
 		case TOK_INT_KW:
-			parse_decl(&decl);
-			if (ast.globals)
-				decl->next = ast.globals;
-			ast.globals = decl;
+			decl = &parse_decl(decl)->next;
 			break;
 		case TOK_PROC:
 			proc = parse_proc();
+			if (get_proc(ast.procs, proc->tok.u.name))
+				parse_die("procedure `%s` redefinition",
+					  proc->tok.u.name);
 			if (ast.procs)
 				proc->next = ast.procs;
 			ast.procs = proc;
@@ -1015,13 +1110,112 @@ print_expr(struct expr *e, int depth)
 	}
 }
 
+void
+print_indent(int indent) {
+	while (indent--)
+		fputs("  ", stdout);
+}
+
+void
+print_stmt(struct stmt *stmt, int indent)
+{
+	if (!stmt)
+		return;
+	print_indent(indent);
+	switch (stmt->tag) {
+	case STMT_RETURN:
+		assert(!stmt->next);
+		fputs("return", stdout);
+		if (stmt->u.expr) {
+			fputs(" ", stdout);
+			print_expr(stmt->u.expr, 0);
+		}
+		printf(";\t# %d:%d:%d\n",
+		       stmt->tok.line,
+		       stmt->tok.col,
+		       stmt->tok.col_end);
+		return;
+	case STMT_DECL:
+		fputs("int ", stdout);
+		while (1) {
+			assert(stmt->tok.tag == TOK_NAME);
+			assert(stmt->tok.u.name);
+			fputs(stmt->tok.u.name, stdout);
+			if (stmt->u.decl.elems) {
+				fputs("[", stdout);
+				print_expr(stmt->u.decl.elems, 0);
+				fputs("]", stdout);
+			} else if (stmt->u.decl.expr) {
+				fputs(" = ", stdout);
+				print_expr(stmt->u.decl.expr, 0);
+			}
+			if (!stmt->next || stmt->next->tag != STMT_DECL)
+				break;
+			printf(",\t# %d:%d:%d\n",
+			       stmt->tok.line,
+			       stmt->tok.col,
+			       stmt->tok.col_end);
+			print_indent(indent);
+			fputs("    ", stdout);
+			stmt = stmt->next;
+		}
+		printf(";\t# %d:%d:%d\n",
+		       stmt->tok.line,
+		       stmt->tok.col,
+		       stmt->tok.col_end);
+		print_stmt(stmt->next, indent);
+		return;
+	case STMT_ASSIGN:
+	case STMT_ASSIGN_ADD:
+	case STMT_ASSIGN_SUB:
+	case STMT_ASSIGN_MUL:
+	case STMT_ASSIGN_DIV:
+	case STMT_ASSIGN_REM:
+		fputs("... = ...;", stdout);
+		printf("\t# %d:%d:%d\n",
+		       stmt->tok.line,
+		       stmt->tok.col,
+		       stmt->tok.col_end);
+		print_stmt(stmt->next, indent);
+		return;
+	case STMT_CALL:
+		fputs("...();", stdout);
+		printf("\t# %d:%d:%d\n",
+		       stmt->tok.line,
+		       stmt->tok.col,
+		       stmt->tok.col_end);
+		print_stmt(stmt->next, indent);
+		return;
+	case STMT_SELECT:
+		fputs("if ...", stdout);
+		printf("\t# %d:%d:%d\n",
+		       stmt->tok.line,
+		       stmt->tok.col,
+		       stmt->tok.col_end);
+		print_stmt(stmt->next, indent);
+		return;
+	case STMT_LOOP:
+		fputs("while ...", stdout);
+		printf("\t# %d:%d:%d\n",
+		       stmt->tok.line,
+		       stmt->tok.col,
+		       stmt->tok.col_end);
+		print_stmt(stmt->next, indent);
+		return;
+	default:
+		assert(!"unexpected state");
+	}
+}
+
 /* XXX */
 void
 print_program(struct ast a)
 {
-	struct stmt *globdecl;
+	struct stmt *globdecl, *par;
+	struct proc *proc;
 
-	fputs("AST\n", stdout);
+	if (a.globals)
+		fputs("# globals\n", stdout);
 	for (globdecl = a.globals; globdecl; globdecl = globdecl->next) {
 		assert(globdecl->tag == STMT_DECL);
 		assert(globdecl->tok.tag == TOK_NAME);
@@ -1042,14 +1236,33 @@ print_program(struct ast a)
 		       globdecl->tok.col,
 		       globdecl->tok.col_end);
 	}
-	fputs("AST END\n", stdout);
+	if (a.globals)
+		fputs("\n", stdout);
+	if (a.procs)
+		fputs("# procedures (procedures/parameters are reversed)\n", stdout);
+	for (proc = a.procs; proc; proc = proc->next) {
+		assert(proc->tok.tag == TOK_NAME);
+		printf("proc %s(", proc->tok.u.name);
+		if (proc->params) {
+			for (par = proc->params; par->next; par = par->next)
+				printf("%s, ", par->tok.u.name);
+			fputs(par->tok.u.name, stdout);
+		}
+		fputs(") {", stdout);
+		printf(" # %d:%d:%d\n",
+		       proc->tok.line,
+		       proc->tok.col,
+		       proc->tok.col_end);
+		print_stmt(proc->body, 1);
+		fputs("}\n", stdout);
+	}
 }
 
 /* XXX */
 int
 eval(int argc, const char **argv)
 {
-	return argc & !argv & 255;
+	return 0;
 }
 
 int
@@ -1061,7 +1274,7 @@ main(int argc, const char **argv)
 			"usage: %s SCRIPT [ARGUMENTS...]\n"
 			"       %s -v\n"
 			"\n"
-			"error output format:\n"
+			"error format:\n"
 			"<script>:<line>:<column>: ERROR: <message>\n",
 			argv0, argv0);
 		return 2;
