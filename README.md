@@ -3,17 +3,6 @@
 ```
 #!/usr/bin/env proc
 
-proc fibonacci(n, memo) {
-    if n <= 1 {
-        return n;
-    }
-    if (memo[n]) {
-        return memo[n];
-    }
-    memo[n] = fibonacci(n - 1, memo) + fibonacci(n - 2, memo);
-    return memo[n];
-}
-
 proc main(argc, argv) {
     # all variables are C `long` integers
     int memo[92]; # zeroed out by default
@@ -23,6 +12,18 @@ proc main(argc, argv) {
     PutInt(fibonacci(StrToInt(argv[1]), &memo));
     PutChar(10); # newline
     # in absence of the return statement, "return 0;" is implied for all procedures
+}
+
+proc fibonacci(n, memo) { # everything is passed by value
+                          # (array variables are just pointers to ints)
+    if n <= 1 {
+        return n;
+    }
+    if (memo[n]) {
+        return memo[n];
+    }
+    memo[n] = fibonacci(n - 1, memo) + fibonacci(n - 2, memo);
+    return memo[n];
 }
 ```
 

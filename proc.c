@@ -99,6 +99,7 @@ enum expr_tag {
 	EXPR_NAME,
 	EXPR_ARRIDX,
 	EXPR_CALL,
+	EXPR_ARGS,
 	EXPR_ADDROF,
 	EXPR_POS,
 	EXPR_NEG,
@@ -352,7 +353,7 @@ get_token_str(struct token t)
 	case TOK_WHILE: return "while";
 	case TOK_PROC: return "proc";
 	case TOK_PERIOD: return ".";
-	case TOK_START:;
+	case TOK_START:
 	default:
 		assert(!"unexpected state");
 	}
@@ -363,9 +364,7 @@ void
 next_token(void)
 {
 	int c, i, line, col;
-	char digits[TOKEN_BUF_SIZE];
-	char name[TOKEN_BUF_SIZE];
-	char *s;
+	char buf[TOKEN_BUF_SIZE], *name;
 
 	if (tok.tag == TOK_NULL)
 		return;
@@ -410,49 +409,49 @@ next_token(void)
 	tok.line = line;
 	tok.col = col;
 	if (IS_DIGIT(c)) {
-		for (i = 0; IS_ALNUM(c) && i < LENGTH(digits) - 1;) {
-			digits[i++] = c;
+		for (i = 0; IS_ALNUM(c) && i < LENGTH(buf) - 1;) {
+			buf[i++] = c;
 			if ((c = fgetc(script_file)) == 95) { /* _ separator */
 				++col;
 				if ((c = fgetc(script_file)) == 95 || !IS_DIGIT(c)) {
-					digits[i] = 0;
+					buf[i] = 0;
 					goto invalid_int_lit;
 				}
 			}
 		}
-		digits[i] = 0;
-		if (i == LENGTH(digits) - 1)
+		buf[i] = 0;
+		if (i == LENGTH(buf) - 1)
 invalid_int_lit:
-			parse_die("invalid integer literal `%s...`", digits);
+			parse_die("invalid integer literal `%s...`", buf);
 		tok.tag = TOK_INT;
-		tok.u.i = str_to_int(digits);
+		tok.u.i = str_to_int(buf);
 		col += i - 1;
 		goto end;
 	} else if (IS_IDENT1(c)) {
-		for (i = 0; IS_IDENT2(c) && i < LENGTH(name) - 1; ++i) {
-			name[i] = c;
+		for (i = 0; IS_IDENT2(c) && i < LENGTH(buf) - 1; ++i) {
+			buf[i] = c;
 			c = fgetc(script_file);
 		}
-		name[i] = 0;
-		if (i == LENGTH(name) - 1)
-			parse_die("invalid name `%s...`", name);
-		if (!strcmp(name, "return")) {
+		buf[i] = 0;
+		if (i == LENGTH(buf) - 1)
+			parse_die("invalid name `%s...`", buf);
+		if (!strcmp(buf, "return")) {
 			tok.tag = TOK_RETURN;
-		} else if (!strcmp(name, "int")) {
+		} else if (!strcmp(buf, "int")) {
 			tok.tag = TOK_INT_KW;
-		} else if (!strcmp(name, "if")) {
+		} else if (!strcmp(buf, "if")) {
 			tok.tag = TOK_IF;
-		} else if (!strcmp(name, "else")) {
+		} else if (!strcmp(buf, "else")) {
 			tok.tag = TOK_ELSE;
-		} else if (!strcmp(name, "while")) {
+		} else if (!strcmp(buf, "while")) {
 			tok.tag = TOK_WHILE;
-		} else if (!strcmp(name, "proc")) {
+		} else if (!strcmp(buf, "proc")) {
 			tok.tag = TOK_PROC;
 		} else {
 			tok.tag = TOK_NAME;
-			s = alloc(&parse_alloc, i + 1);
-			memcpy(s, name, i + 1);
-			tok.u.name = s;
+			name = alloc(&parse_alloc, i + 1);
+			memcpy(name, buf, i + 1);
+			tok.u.name = name;
 		}
 		col += i - 1;
 		goto end;
@@ -697,8 +696,11 @@ parse_binary_expr(struct expr *left, int minprec)
 		next_token();
 		while (tok.tag != TOK_PAREN_R) {
 			undo_token();
-			*arg = parse_expr(0);
-			arg = &(*arg)->left;
+			*arg = alloc(&parse_alloc, sizeof(*e));
+			(*arg)->tag = EXPR_ARGS;
+			(*arg)->tok = tok;
+			(*arg)->left = parse_expr(0);
+			arg = &(*arg)->right;
 			next_token();
 			if (tok.tag == TOK_COMMA)
 				next_token();
@@ -1055,7 +1057,7 @@ print_expr(struct expr *e, int depth)
 			fputs("(", stdout);
 		print_expr(e->left, depth + 1);
 		fputs("[", stdout);
-		print_expr(e->right, depth + 1);
+		print_expr(e->right, depth);
 		fputs("]", stdout);
 		if (depth)
 			fputs(")", stdout);
@@ -1064,11 +1066,11 @@ print_expr(struct expr *e, int depth)
 		fputs(get_token_str(e->left->tok), stdout);
 		fputs("(", stdout);
 		if (e->right) {
-			for (arg = e->right; arg->left; arg = arg->left) {
-				print_expr(arg, depth + 1);
+			for (arg = e->right; arg->right; arg = arg->right) {
+				print_expr(arg->left, depth);
 				fputs(", ", stdout);
 			}
-			print_expr(arg, depth + 1);
+			print_expr(arg->left, depth);
 		}
 		fputs(")", stdout);
 		break;
@@ -1078,7 +1080,7 @@ print_expr(struct expr *e, int depth)
 	case EXPR_NOT:
 		fputs(get_token_str(e->tok), stdout);
 		fputs("(", stdout);
-		print_expr(e->left, depth + 1);
+		print_expr(e->left, depth);
 		fputs(")", stdout);
 		break;
 	case EXPR_REM:
@@ -1123,7 +1125,6 @@ print_stmt(struct stmt *stmt, int indent)
 	print_indent(indent);
 	switch (stmt->tag) {
 	case STMT_RETURN:
-		assert(!stmt->next);
 		fputs("return", stdout);
 		if (stmt->u.expr) {
 			fputs(" ", stdout);
@@ -1137,8 +1138,6 @@ print_stmt(struct stmt *stmt, int indent)
 	case STMT_DECL:
 		fputs("int ", stdout);
 		while (1) {
-			assert(stmt->tok.tag == TOK_NAME);
-			assert(stmt->tok.u.name);
 			fputs(stmt->tok.u.name, stdout);
 			if (stmt->u.decl.elems) {
 				fputs("[", stdout);
@@ -1170,16 +1169,18 @@ print_stmt(struct stmt *stmt, int indent)
 	case STMT_ASSIGN_MUL:
 	case STMT_ASSIGN_DIV:
 	case STMT_ASSIGN_REM:
-		fputs("... = ...;", stdout);
-		printf("\t# %d:%d:%d\n",
+		print_expr(stmt->u.ass.lhs, 0);
+		printf(" %.3s", &" = += -= *= /= %= "[(stmt->tag - STMT_ASSIGN) * 3]);
+		print_expr(stmt->u.ass.rhs, 0);
+		printf(";\t# %d:%d:%d\n",
 		       stmt->tok.line,
 		       stmt->tok.col,
 		       stmt->tok.col_end);
 		print_stmt(stmt->next, indent);
 		return;
 	case STMT_CALL:
-		fputs("...();", stdout);
-		printf("\t# %d:%d:%d\n",
+		print_expr(stmt->u.expr, 0);
+		printf(";\t# %d:%d:%d\n",
 		       stmt->tok.line,
 		       stmt->tok.col,
 		       stmt->tok.col_end);
@@ -1216,9 +1217,6 @@ print_program(struct ast a)
 	if (a.globals)
 		fputs("# globals\n", stdout);
 	for (globdecl = a.globals; globdecl; globdecl = globdecl->next) {
-		assert(globdecl->tag == STMT_DECL);
-		assert(globdecl->tok.tag == TOK_NAME);
-		assert(globdecl->tok.u.name);
 		if (globdecl->u.decl.elems) {
 			printf("int %s[", globdecl->tok.u.name);
 			print_expr(globdecl->u.decl.elems, 0);
@@ -1240,7 +1238,6 @@ print_program(struct ast a)
 	if (a.procs)
 		fputs("# procedures (procedures/parameters are reversed)\n", stdout);
 	for (proc = a.procs; proc; proc = proc->next) {
-		assert(proc->tok.tag == TOK_NAME);
 		printf("proc %s(", proc->tok.u.name);
 		if (proc->params) {
 			for (par = proc->params; par->next; par = par->next)
@@ -1264,19 +1261,28 @@ eval(int argc, const char **argv)
 	return 0;
 }
 
+void
+usage() {
+	fprintf(stderr,
+		"usage: %s SCRIPT [ARGUMENTS...]\n"
+		"       %s -h                        # show this\n"
+		"       %s -v                        # show version\n"
+		"\n"
+		"error format:\n"
+		"<script>:<line>:<column>: ERROR: <message>\n",
+		argv0, argv0, argv0);
+}
+
 int
 main(int argc, const char **argv)
 {
 	argv0 = argv[0];
 	if (argc < 2) {
-		fprintf(stderr,
-			"usage: %s SCRIPT [ARGUMENTS...]\n"
-			"       %s -v\n"
-			"\n"
-			"error format:\n"
-			"<script>:<line>:<column>: ERROR: <message>\n",
-			argv0, argv0);
+		usage();
 		return 2;
+	} else if (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help")) {
+		usage();
+		return 0;
 	} else if (!strcmp(argv[1], "-v")) {
 		puts(VERSION);
 		return 0;
