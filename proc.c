@@ -14,15 +14,16 @@
 #define EVAL_DATA_SIZE (50l*1000*1000)
 #define WORDS_SIZE (500l*1000)
 #define UNARY_PREC 6
-#define ALIGN sizeof(void *)
+#define ROUND_UP(n, to) (((n) + ((to) - 1)) & ~((to) - 1))
 #define LENGTH(x) ((int)(sizeof(x) / sizeof((x)[0])))
 
 /* assumes ASCII */
 #define IS_SPACE(c) (((c) >= 0 && (c) <= 32) || (c) == 127)
 #define IS_DIGIT(c) ((c) >= 48 && (c) <= 57)
 #define IS_ALPHA(c) (((c) >= 65 && (c) <= 90) || ((c) >= 97 && (c) <= 122))
-#define IS_IDENT1(c) (IS_ALPHA(c) || (c) == 95)                /* A-Za-z_ */
-#define IS_IDENT2(c) (IS_ALPHA(c) || (c) == 95 || IS_DIGIT(c)) /* A-Za-z_0-9 */
+#define IS_ALNUM(c) (IS_DIGIT(c) || IS_ALPHA(c))
+#define IS_IDENT1(c) (IS_ALPHA(c) || (c) == 95) /* A-Za-z_ */
+#define IS_IDENT2(c) (IS_ALNUM(c) || (c) == 95) /* A-Za-z_0-9 */
 
 struct bumpalloc {
 	char *beg, *top, *end;
@@ -208,7 +209,7 @@ alloc(struct bumpalloc *a, size_t n)
 {
 	char *new, *last;
 
-	new = a->top + ((n + ALIGN - 1) & ~(ALIGN - 1));
+	new = a->top + ROUND_UP(n, sizeof(void *));
 	assert(new >= a->beg);
 	assert(new >= a->top);
 	assert(new <= a->end);
@@ -222,7 +223,7 @@ dealloc(struct bumpalloc *a, size_t n)
 {
 	char *new;
 
-	new = a->top - ((n + ALIGN - 1) & ~(ALIGN - 1));
+	new = a->top - ROUND_UP(n, sizeof(void *));
 	assert(new >= a->beg);
 	assert(new <= a->top);
 	assert(new <= a->end);
@@ -272,15 +273,16 @@ str_to_int(const char *digits)
 			goto invalid_int_lit;
 		}
 		s += 2;
-
+		if (!*s)
+			goto invalid_int_lit;
 	}
 	while (*s) {
 		if (IS_DIGIT(*s))
 			digitval = *s - 48;
 		else if (base == 16 && *s >= 65 && *s <= 70) /* A-F */
-			digitval = *s - 65;
+			digitval = *s - 65 + 10;
 		else if (base == 16 && *s >= 97 && *s <= 102) /* a-f */
-			digitval = *s - 97;
+			digitval = *s - 97 + 10;
 		else
 			goto invalid_int_lit;
 		if (digitval >= base)
@@ -408,7 +410,7 @@ next_token(void)
 	tok.line = line;
 	tok.col = col;
 	if (IS_DIGIT(c)) {
-		for (i = 0; IS_DIGIT(c) && i < LENGTH(digits) - 1;) {
+		for (i = 0; IS_ALNUM(c) && i < LENGTH(digits) - 1;) {
 			digits[i++] = c;
 			if ((c = fgetc(script_file)) == 95) { /* _ separator */
 				++col;
@@ -419,7 +421,7 @@ next_token(void)
 			}
 		}
 		digits[i] = 0;
-		if (IS_IDENT1(c) || i == LENGTH(digits) - 1)
+		if (i == LENGTH(digits) - 1)
 invalid_int_lit:
 			parse_die("invalid integer literal `%s...`", digits);
 		tok.tag = TOK_INT;
@@ -752,7 +754,7 @@ parse_decl(struct stmt **decl)
 			next_token();
 		}
 		if (tok.tag == TOK_SEMICOLON) {
-			return *decl;
+			return *decl; /* return last declaration in the list (int a, ..., z) */
 		} else if (tok.tag != TOK_COMMA) {
 			parse_die("expected `;` or `,`, but got `%s`", get_token_str(tok));
 		}
@@ -897,7 +899,7 @@ parse_stmt(void)
 			undo_token();
 			return root;
 		case TOK_INT_KW:
-			stmt = &parse_decl(stmt)->next; /* int a, ..., z; (get "z") */
+			stmt = &parse_decl(stmt)->next;
 			break;
 		case TOK_IF:
 			*stmt = parse_if();
@@ -911,10 +913,10 @@ parse_stmt(void)
 			*stmt = alloc(&parse_alloc, sizeof(struct stmt));
 			(*stmt)->tok = tok;
 			next_token();
+			tok_undo[1] = (*stmt)->tok;
+			tok_undo[0] = tok;
+			tok_undo_top = 2;
 			if (tok.tag == TOK_PAREN_L) {
-				tok_undo[0] = tok;
-				tok_undo[1] = (*stmt)->tok;
-				tok_undo_top = 2;
 				(*stmt)->tag = STMT_CALL;
 				(*stmt)->u.expr = parse_expr(0);
 				if ((*stmt)->u.expr->tag != EXPR_CALL)
@@ -924,9 +926,6 @@ parse_stmt(void)
 				if (tok.tag != TOK_SEMICOLON)
 					parse_die("expected `;`, but got `%s`", get_token_str(tok));
 			} else {
-				tok_undo[0] = tok;
-				tok_undo[1] = (*stmt)->tok;
-				tok_undo_top = 2;
 				parse_assign(stmt);
 			}
 			stmt = &(*stmt)->next;
