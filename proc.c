@@ -274,6 +274,25 @@ parse_die(const char *msg, ...)
 	exit(2);
 }
 
+void
+eval_die(const char *msg, struct token *t, ...)
+{
+	va_list ap;
+	char *s;
+
+	s = alloc(&eval_alloc, TOKEN_BUF_SIZE * 4);
+	va_start(ap, msg);
+	vsprintf(s, msg, ap);
+	va_end(ap);
+	if (t && t->line > 0 && t->col > 0)
+		fprintf(stderr, "%s:%d:%d: ERROR: %s\n", script_path, t->line, t->col, s);
+	else
+		fprintf(stderr, "%s: ERROR: %s\n", script_path, s);
+	if (script_file)
+		fclose(script_file);
+	exit(3);
+}
+
 int64_t
 str_to_int(const char *digits)
 {
@@ -808,7 +827,7 @@ parse_expr(int minprec)
 }
 
 struct stmt *
-parse_decl(struct stmt **decl)
+parse_decl(struct stmt **decl, int depth)
 {
 	while (1) {
 		*decl = alloc(&parse_alloc, sizeof(struct stmt));
@@ -829,6 +848,8 @@ parse_decl(struct stmt **decl)
 			next_token();
 		}
 		if (tok.tag == TOK_SEMICOLON) {
+			if (depth)
+				parse_die("declaration is not possible in procedure inner blocks");
 			return *decl; /* return last declaration in the list (int a, ..., z) */
 		} else if (tok.tag != TOK_COMMA) {
 			parse_die("expected `;` or `,`, but got `%s`", get_token_str(tok));
@@ -866,10 +887,10 @@ parse_assign(struct stmt **stmt)
 		parse_die("expected `;`, but got `%s`", get_token_str(tok));
 }
 
-struct stmt *parse_stmt(void);
+struct stmt *parse_stmt(int depth);
 
 struct stmt *
-parse_if(void)
+parse_if(int depth)
 {
 	struct stmt *root = NULL, **sel;
 
@@ -882,7 +903,7 @@ parse_if(void)
 		next_token();
 		if (tok.tag != TOK_BRACE_L)
 			parse_die("expected `{`, but got `%s`", get_token_str(tok));
-		(*sel)->u.sel.ifbody = parse_stmt();
+		(*sel)->u.sel.ifbody = parse_stmt(depth + 1);
 		next_token();
 		if (tok.tag != TOK_BRACE_R)
 			parse_die("expected `}`, but got `%s`", get_token_str(tok));
@@ -893,7 +914,7 @@ parse_if(void)
 		}
 		next_token();
 		if (tok.tag == TOK_BRACE_L) {
-			(*sel)->u.sel.elsebody = parse_stmt();
+			(*sel)->u.sel.elsebody = parse_stmt(depth + 1);
 			next_token();
 			if (tok.tag != TOK_BRACE_R)
 				parse_die("expected `}`, but got `%s`", get_token_str(tok));
@@ -907,7 +928,7 @@ parse_if(void)
 }
 
 struct stmt *
-parse_while(void)
+parse_while(int depth)
 {
 	struct stmt *root = NULL;
 
@@ -918,7 +939,7 @@ parse_while(void)
 	next_token();
 	if (tok.tag != TOK_BRACE_L)
 		parse_die("expected `{`, but got `%s`", get_token_str(tok));
-	root->u.loop.body = parse_stmt();
+	root->u.loop.body = parse_stmt(depth + 1);
 	next_token();
 	if (tok.tag != TOK_BRACE_R)
 		parse_die("expected `}`, but got `%s`", get_token_str(tok));
@@ -926,7 +947,7 @@ parse_while(void)
 }
 
 struct stmt *
-parse_stmt(void)
+parse_stmt(int depth)
 {
 	struct stmt *root = NULL, **stmt;
 	int unclosedbraces = 0;
@@ -969,14 +990,14 @@ parse_stmt(void)
 			undo_token();
 			return root;
 		case TOK_INT_KW:
-			stmt = &parse_decl(stmt)->next;
+			stmt = &parse_decl(stmt, depth)->next;
 			break;
 		case TOK_IF:
-			*stmt = parse_if();
+			*stmt = parse_if(depth + 1);
 			stmt = &(*stmt)->next;
 			break;
 		case TOK_WHILE:
-			*stmt = parse_while();
+			*stmt = parse_while(depth + 1);
 			stmt = &(*stmt)->next;
 			break;
 		case TOK_NAME: /* assignment or call */
@@ -1066,7 +1087,7 @@ parse_proc(void)
 	next_token();
 	if (tok.tag != TOK_BRACE_L)
 		parse_die("expected `{`, but got `%s`", get_token_str(tok));
-	proc->body = parse_stmt();
+	proc->body = parse_stmt(0);
 	next_token();
 	if (tok.tag != TOK_BRACE_R)
 		parse_die("expected `}`, but got `%s`", get_token_str(tok));
@@ -1089,7 +1110,7 @@ parse(void)
 		next_token();
 		switch (tok.tag) {
 		case TOK_INT_KW:
-			decl = &parse_decl(decl)->next;
+			decl = &parse_decl(decl, 0)->next;
 			break;
 		case TOK_PROC:
 			proc = parse_proc();
@@ -1266,19 +1287,32 @@ print_stmt(struct stmt *stmt, int indent)
 		print_stmt(stmt->next, indent);
 		return;
 	case STMT_SELECT:
-		fputs("if ...", stdout);
-		printf("\t# %d:%d:%d\n",
+		fputs("if ", stdout);
+		print_expr(stmt->u.sel.cond, 0);
+		printf(" {\t# %d:%d:%d\n",
 		       stmt->tok.line,
 		       stmt->tok.col,
 		       stmt->tok.col_end);
+		print_stmt(stmt->u.sel.ifbody, indent + 1);
+		print_indent(indent);
+		if (stmt->u.sel.elsebody) {
+			fputs("} else {\n", stdout);
+			print_stmt(stmt->u.sel.elsebody, indent + 1);
+			print_indent(indent);
+		}
+		fputs("}\n", stdout);
 		print_stmt(stmt->next, indent);
 		return;
 	case STMT_LOOP:
-		fputs("while ...", stdout);
-		printf("\t# %d:%d:%d\n",
+		fputs("while ", stdout);
+		print_expr(stmt->u.loop.cond, 0);
+		printf(" {\t# %d:%d:%d\n",
 		       stmt->tok.line,
 		       stmt->tok.col,
 		       stmt->tok.col_end);
+		print_stmt(stmt->u.loop.body, indent + 1);
+		print_indent(indent);
+		fputs("}\n", stdout);
 		print_stmt(stmt->next, indent);
 		return;
 	default:
@@ -1286,7 +1320,6 @@ print_stmt(struct stmt *stmt, int indent)
 	}
 }
 
-/* XXX */
 void
 print_program(struct ast a)
 {
