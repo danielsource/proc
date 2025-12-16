@@ -4,7 +4,7 @@
 #!/usr/bin/env proc
 
 proc main(argc, argv) {
-    # all variables are C `long` integers
+    # all variables are C `int64_t` integers
     int memo[92]; # zeroed out by default
     if (argc != 2) {
         return 1;
@@ -22,6 +22,7 @@ proc fibonacci(n, memo) { # everything is passed by value
     if (memo[n]) {
         return memo[n];
     }
+    # operator precedence is similar to C's
     memo[n] = fibonacci(n - 1, memo) + fibonacci(n - 2, memo);
     return memo[n];
 }

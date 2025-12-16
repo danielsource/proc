@@ -2,6 +2,7 @@
 
 #include <stddef.h>
 #include <limits.h>
+#include <inttypes.h>
 #include <assert.h>
 #include <stdarg.h>
 #include <string.h>
@@ -13,17 +14,19 @@
 #define PARSE_DATA_SIZE (50l*1000*1000)
 #define EVAL_DATA_SIZE (50l*1000*1000)
 #define WORDS_SIZE (500l*1000)
-#define UNARY_PREC 6
+#define UNARY_PREC 10
+
 #define ROUND_UP(n, to) (((n) + ((to) - 1)) & ~((to) - 1))
 #define LENGTH(x) ((int)(sizeof(x) / sizeof((x)[0])))
 
 /* assumes ASCII */
 #define IS_SPACE(c) (((c) >= 0 && (c) <= 32) || (c) == 127)
-#define IS_DIGIT(c) ((c) >= 48 && (c) <= 57)
-#define IS_ALPHA(c) (((c) >= 65 && (c) <= 90) || ((c) >= 97 && (c) <= 122))
+#define IS_DIGIT(c) ((c) >= '0' && (c) <= '9')
+#define IS_ALPHA(c) (((c) >= 'A' && (c) <= 'Z') || ((c) >= 'a' && (c) <= 'z'))
+#define IS_PRINT(c) ((c) >= ' ' && (c) <= '~')
 #define IS_ALNUM(c) (IS_DIGIT(c) || IS_ALPHA(c))
-#define IS_IDENT1(c) (IS_ALPHA(c) || (c) == 95) /* A-Za-z_ */
-#define IS_IDENT2(c) (IS_ALNUM(c) || (c) == 95) /* A-Za-z_0-9 */
+#define IS_IDENT1(c) (IS_ALPHA(c) || (c) == '_') /* A-Za-z_ */
+#define IS_IDENT2(c) (IS_ALNUM(c) || (c) == '_') /* A-Za-z_0-9 */
 
 struct bumpalloc {
 	char *beg, *top, *end;
@@ -46,6 +49,8 @@ enum tok_tag {
 	TOK_PLUS,
 	TOK_MINUS,
 	TOK_EXCLAM,
+	TOK_TILDE,
+	TOK_CARET,
 	TOK_PERCENT,
 	TOK_SLASH,
 	TOK_ASTERISK,
@@ -53,6 +58,8 @@ enum tok_tag {
 	TOK_GREATER_EQUALS,
 	TOK_LESS,
 	TOK_LESS_EQUALS,
+	TOK_SHIFT_L,
+	TOK_SHIFT_R,
 	TOK_NOT_EQUALS,
 	TOK_EQUALS,
 	TOK_ASSIGN,
@@ -61,7 +68,13 @@ enum tok_tag {
 	TOK_ASSIGN_MUL,
 	TOK_ASSIGN_DIV,
 	TOK_ASSIGN_REM,
+	TOK_ASSIGN_BIT_SH_L,
+	TOK_ASSIGN_BIT_SH_R,
+	TOK_ASSIGN_BIT_AND,
+	TOK_ASSIGN_BIT_XOR,
+	TOK_ASSIGN_BIT_OR,
 	TOK_AND,
+	TOK_PIPE,
 	TOK_OR,
 	TOK_RETURN,
 	TOK_INT_KW,
@@ -76,7 +89,7 @@ struct token {
 	enum tok_tag tag;
 	int line, col, col_end;
 	union {
-		long i;
+		int64_t i;
 		const char *name;
 	} u;
 };
@@ -104,17 +117,23 @@ enum expr_tag {
 	EXPR_POS,
 	EXPR_NEG,
 	EXPR_NOT,
+	EXPR_BIT_NOT,
 	EXPR_REM,
 	EXPR_DIV,
 	EXPR_MUL,
 	EXPR_SUB,
 	EXPR_ADD,
+	EXPR_BIT_SH_R,
+	EXPR_BIT_SH_L,
 	EXPR_GE,
 	EXPR_GT,
 	EXPR_LE,
 	EXPR_LT,
 	EXPR_NEQ,
 	EXPR_EQ,
+	EXPR_BIT_AND,
+	EXPR_BIT_XOR,
+	EXPR_BIT_OR,
 	EXPR_AND,
 	EXPR_OR
 };
@@ -154,6 +173,11 @@ enum stmt_tag {
 	STMT_ASSIGN_MUL,
 	STMT_ASSIGN_DIV,
 	STMT_ASSIGN_REM,
+	STMT_ASSIGN_BIT_SH_L,
+	STMT_ASSIGN_BIT_SH_R,
+	STMT_ASSIGN_BIT_AND,
+	STMT_ASSIGN_BIT_XOR,
+	STMT_ASSIGN_BIT_OR,
 	STMT_CALL,
 	STMT_SELECT,
 	STMT_LOOP
@@ -183,7 +207,7 @@ struct bumpalloc parse_alloc;
 char eval_data[EVAL_DATA_SIZE];
 struct bumpalloc eval_alloc;
 
-long words[WORDS_SIZE];
+int64_t words[WORDS_SIZE];
 struct bumpalloc word_alloc;
 
 struct token tok = {TOK_START};
@@ -237,7 +261,7 @@ parse_die(const char *msg, ...)
 	va_list ap;
 	char *s;
 
-	s = alloc(&parse_alloc, 256);
+	s = alloc(&parse_alloc, TOKEN_BUF_SIZE * 4);
 	va_start(ap, msg);
 	vsprintf(s, msg, ap);
 	va_end(ap);
@@ -250,24 +274,24 @@ parse_die(const char *msg, ...)
 	exit(2);
 }
 
-long
+int64_t
 str_to_int(const char *digits)
 {
-	long n = 0, sign = 1, base = 10, digitval;
+	int64_t n = 0, sign = 1, base = 10, digitval;
 	const char *s;
 
 	s = digits;
-	if (*s == 43) { /* + */
+	if (*s == '+') {
 		++s;
-	} else if (*s == 45) { /* - */
+	} else if (*s == '-') {
 		sign = -1;
 		++s;
 	}
-	if (*s == 48 && !IS_DIGIT(s[1])) { /* 0b..., 0o..., 0x... */
+	if (*s == '0' && !IS_DIGIT(s[1])) { /* 0b..., 0o..., 0x... */
 		switch (s[1]) {
-		case 66: case 98: base = 2; break;
-		case 79: case 111: base = 8; break;
-		case 88: case 120: base = 16; break;
+		case 'B': case 'b': base = 2; break;
+		case 'O': case 'o': base = 8; break;
+		case 'X': case 'x': base = 16; break;
 		case 0:
 			return 0;
 		default:
@@ -279,11 +303,11 @@ str_to_int(const char *digits)
 	}
 	while (*s) {
 		if (IS_DIGIT(*s))
-			digitval = *s - 48;
-		else if (base == 16 && *s >= 65 && *s <= 70) /* A-F */
-			digitval = *s - 65 + 10;
-		else if (base == 16 && *s >= 97 && *s <= 102) /* a-f */
-			digitval = *s - 97 + 10;
+			digitval = *s - '0';
+		else if (base == 16 && *s >= 'A' && *s <= 'F') /* A-F */
+			digitval = *s - 'A' + 10;
+		else if (base == 16 && *s >= 'a' && *s <= 'f') /* a-f */
+			digitval = *s - 'a' + 10;
 		else
 			goto invalid_int_lit;
 		if (digitval >= base)
@@ -311,8 +335,8 @@ get_token_str(struct token t)
 	case TOK_NULL: return "end-of-file";
 	case TOK_INT:
 		if (t.line > 0 && t.col > 0) {
-			s = alloc(&parse_alloc, 32);
-			sprintf(s, "%ld", t.u.i);
+			s = alloc(&parse_alloc, TOKEN_BUF_SIZE);
+			sprintf(s, "%"PRIi64, t.u.i);
 			return s;
 		}
 		return "<integer>";
@@ -329,6 +353,8 @@ get_token_str(struct token t)
 	case TOK_PLUS: return "+";
 	case TOK_MINUS: return "-";
 	case TOK_EXCLAM: return "!";
+	case TOK_TILDE: return "~";
+	case TOK_CARET: return "^";
 	case TOK_PERCENT: return "%";
 	case TOK_SLASH: return "/";
 	case TOK_ASTERISK: return "*";
@@ -336,15 +362,23 @@ get_token_str(struct token t)
 	case TOK_GREATER_EQUALS: return ">=";
 	case TOK_LESS: return "<";
 	case TOK_LESS_EQUALS: return "<=";
+	case TOK_SHIFT_L: return "<<";
+	case TOK_SHIFT_R: return ">>";
 	case TOK_NOT_EQUALS: return "!=";
 	case TOK_EQUALS: return "==";
 	case TOK_ASSIGN: return "=";
 	case TOK_ASSIGN_ADD: return "+=";
 	case TOK_ASSIGN_SUB: return "-=";
-	case TOK_ASSIGN_MUL: return "*";
-	case TOK_ASSIGN_DIV: return "/";
-	case TOK_ASSIGN_REM: return "%";
+	case TOK_ASSIGN_MUL: return "*=";
+	case TOK_ASSIGN_DIV: return "/=";
+	case TOK_ASSIGN_REM: return "%=";
+	case TOK_ASSIGN_BIT_SH_L: return "<<=";
+	case TOK_ASSIGN_BIT_SH_R: return ">>=";
+	case TOK_ASSIGN_BIT_AND: return "&=";
+	case TOK_ASSIGN_BIT_XOR: return "^=";
+	case TOK_ASSIGN_BIT_OR: return "|=";
 	case TOK_AND: return "&&";
+	case TOK_PIPE: return "|";
 	case TOK_OR: return "||";
 	case TOK_RETURN: return "return";
 	case TOK_INT_KW: return "int";
@@ -390,7 +424,7 @@ next_token(void)
 	++col;
 	while (1) {
 		while (IS_SPACE(c)) {
-			if (c == 10) { /* newline */
+			if (c == '\n') {
 				++line;
 				col = 0;
 			}
@@ -398,9 +432,9 @@ next_token(void)
 				goto end;
 			++col;
 		}
-		if (c != 35) /* comment is # (35) */
+		if (c != '#') /* comment is # */
 			break;
-		while (c != 10) {
+		while (c != '\n') {
 			if ((c = fgetc(script_file)) == EOF)
 				goto end;
 			++col;
@@ -411,9 +445,9 @@ next_token(void)
 	if (IS_DIGIT(c)) {
 		for (i = 0; IS_ALNUM(c) && i < LENGTH(buf) - 1;) {
 			buf[i++] = c;
-			if ((c = fgetc(script_file)) == 95) { /* _ separator */
+			if ((c = fgetc(script_file)) == '_') { /* _ separator */
 				++col;
-				if ((c = fgetc(script_file)) == 95 || !IS_DIGIT(c)) {
+				if ((c = fgetc(script_file)) == '_' || !IS_DIGIT(c)) {
 					buf[i] = 0;
 					goto invalid_int_lit;
 				}
@@ -457,133 +491,166 @@ invalid_int_lit:
 		goto end;
 	}
 	switch (c) {
-	case 39: /* 'c' character literal */
+	case '\'': /* 'c' character literal */
 		c = fgetc(script_file);
-		if (c == 92) { /* \<escape> */
+		if (c == '\\') { /* \<escape> */
 			c = fgetc(script_file);
 			switch (c) {
-			case 97: i = 7; break; /* \a */
-			case 98: i = 8; break; /* \b */
-			case 116: i = 9; break; /* \t */
-			case 110: i = 10; break; /* \n */
-			case 114: i = 13; break; /* \r */
-			case 101: i = 27; break; /* \e */
-			case 92: i = 92; break; /* \\ */
+			case '\'': i = '\''; break; /* \\ */
+			case '\\': i = '\\'; break; /* \\ */
+			case 'a': i = '\a'; break; /* \a */
+			case 'b': i = '\b'; break; /* \b */
+			case 't': i = '\t'; break; /* \t */
+			case 'n': i = '\n'; break; /* \n */
+			case 'r': i = '\r'; break; /* \r */
+			case 'e': i = 27; break; /* \e */
 			default:
 				goto invalid_char_lit;
 			}
 			++col;
-		} else if (c != 39 && c >= 32 && c <= 126) { /* printable */
+		} else if (c != '\'' && IS_PRINT(c)) {
 			i = c;
 		} else {
 			goto invalid_char_lit;
 		}
 		c = fgetc(script_file);
-		if (c != 39)
+		if (c != '\'')
 invalid_char_lit:
 			parse_die("invalid character literal");
 		tok.tag = TOK_INT;
 		tok.u.i = i;
 		col += 2;
 		goto end_consuming;
-	case 40: tok.tag = TOK_PAREN_L; goto end_consuming;
-	case 41: tok.tag = TOK_PAREN_R; goto end_consuming;
-	case 91: tok.tag = TOK_BRACKET_L; goto end_consuming;
-	case 93: tok.tag = TOK_BRACKET_R; goto end_consuming;
-	case 123: tok.tag = TOK_BRACE_L; goto end_consuming;
-	case 125: tok.tag = TOK_BRACE_R; goto end_consuming;
-	case 59: tok.tag = TOK_SEMICOLON; goto end_consuming;
-	case 44: tok.tag = TOK_COMMA; goto end_consuming;
-	case 38:
+	case '(': tok.tag = TOK_PAREN_L; goto end_consuming;
+	case ')': tok.tag = TOK_PAREN_R; goto end_consuming;
+	case '[': tok.tag = TOK_BRACKET_L; goto end_consuming;
+	case ']': tok.tag = TOK_BRACKET_R; goto end_consuming;
+	case '{': tok.tag = TOK_BRACE_L; goto end_consuming;
+	case '}': tok.tag = TOK_BRACE_R; goto end_consuming;
+	case ';': tok.tag = TOK_SEMICOLON; goto end_consuming;
+	case ',': tok.tag = TOK_COMMA; goto end_consuming;
+	case '~': tok.tag = TOK_TILDE; goto end_consuming;
+	case '&':
 		tok.tag = TOK_AMPERSAND;
-		if ((c = fgetc(script_file)) == 38) {
+		if ((c = fgetc(script_file)) == '&') {
 			tok.tag = TOK_AND;
+			++col;
+			goto end_consuming;
+		} else if (c == '=') {
+			tok.tag = TOK_ASSIGN_BIT_AND;
 			++col;
 			goto end_consuming;
 		}
 		goto end;
-	case 124:
-		if ((c = fgetc(script_file)) == 124) {
-			tok.tag = TOK_OR;
+	case '^':
+		tok.tag = TOK_CARET;
+		if ((c = fgetc(script_file)) == '=') {
+			tok.tag = TOK_ASSIGN_BIT_XOR;
 			++col;
 			goto end_consuming;
 		}
-		c = 124;
-		goto unexpected_char;
-	case 43:
+		goto end;
+	case '|':
+		tok.tag = TOK_PIPE;
+		if ((c = fgetc(script_file)) == '|') {
+			tok.tag = TOK_OR;
+			++col;
+			goto end_consuming;
+		} else if (c == '=') {
+			tok.tag = TOK_ASSIGN_BIT_OR;
+			++col;
+			goto end_consuming;
+		}
+		goto end;
+	case '+':
 		tok.tag = TOK_PLUS;
-		if ((c = fgetc(script_file)) == 61) {
+		if ((c = fgetc(script_file)) == '=') {
 			tok.tag = TOK_ASSIGN_ADD;
 			++col;
 			goto end_consuming;
 		}
 		goto end;
-	case 45:
+	case '-':
 		tok.tag = TOK_MINUS;
-		if ((c = fgetc(script_file)) == 61) {
+		if ((c = fgetc(script_file)) == '=') {
 			tok.tag = TOK_ASSIGN_SUB;
 			++col;
 			goto end_consuming;
 		}
 		goto end;
-	case 33:
+	case '!':
 		tok.tag = TOK_EXCLAM;
-		if ((c = fgetc(script_file)) == 61) {
+		if ((c = fgetc(script_file)) == '=') {
 			tok.tag = TOK_NOT_EQUALS;
 			++col;
 			goto end_consuming;
 		}
 		goto end;
-	case 37:
+	case '%':
 		tok.tag = TOK_PERCENT;
-		if ((c = fgetc(script_file)) == 61) {
+		if ((c = fgetc(script_file)) == '=') {
 			tok.tag = TOK_ASSIGN_REM;
 			++col;
 			goto end_consuming;
 		}
 		goto end;
-	case 47:
+	case '/':
 		tok.tag = TOK_SLASH;
-		if ((c = fgetc(script_file)) == 61) {
+		if ((c = fgetc(script_file)) == '=') {
 			tok.tag = TOK_ASSIGN_DIV;
 			++col;
 			goto end_consuming;
 		}
 		goto end;
-	case 42:
+	case '*':
 		tok.tag = TOK_ASTERISK;
-		if ((c = fgetc(script_file)) == 61) {
+		if ((c = fgetc(script_file)) == '=') {
 			tok.tag = TOK_ASSIGN_MUL;
 			++col;
 			goto end_consuming;
 		}
 		goto end;
-	case 62:
+	case '>':
 		tok.tag = TOK_GREATER;
-		if ((c = fgetc(script_file)) == 61) {
+		if ((c = fgetc(script_file)) == '=') {
 			tok.tag = TOK_GREATER_EQUALS;
 			++col;
 			goto end_consuming;
-		}
-		goto end;
-	case 60:
-		tok.tag = TOK_LESS;
-		if ((c = fgetc(script_file)) == 61) {
-			tok.tag = TOK_LESS_EQUALS;
+		} else if (c == '>') {
+			tok.tag = TOK_SHIFT_R;
 			++col;
+			if ((c = fgetc(script_file)) == '=') {
+				tok.tag = TOK_ASSIGN_BIT_SH_R;
+				++col;
+			}
 			goto end_consuming;
 		}
 		goto end;
-	case 61:
+	case '<':
+		tok.tag = TOK_LESS;
+		if ((c = fgetc(script_file)) == '=') {
+			tok.tag = TOK_LESS_EQUALS;
+			++col;
+			goto end_consuming;
+		} else if (c == '<') {
+			tok.tag = TOK_SHIFT_L;
+			++col;
+			if ((c = fgetc(script_file)) == '=') {
+				tok.tag = TOK_ASSIGN_BIT_SH_L;
+				++col;
+			}
+			goto end_consuming;
+		}
+		goto end;
+	case '=':
 		tok.tag = TOK_ASSIGN;
-		if ((c = fgetc(script_file)) == 61) {
+		if ((c = fgetc(script_file)) == '=') {
 			tok.tag = TOK_EQUALS;
 			++col;
 			goto end_consuming;
 		}
 		goto end;
 	default:
-unexpected_char:
 		if (c == EOF)
 			parse_die("unexpected end-of-file");
 		else if (c > 127)
@@ -592,7 +659,7 @@ unexpected_char:
 				  c);
 		else
 			parse_die("unexpected character %c%c%c (%d)",
-				  c==96?39:96, c, c==96?39:96, c);
+				  c=='`'?'\'':'`', c, c=='`'?'\'':'`', c);
 	}
 end:
 	if (c != EOF
@@ -639,8 +706,9 @@ parse_unary_expr(void)
 	case TOK_PLUS: e->tag = EXPR_POS; break;
 	case TOK_MINUS: e->tag = EXPR_NEG; break;
 	case TOK_EXCLAM: e->tag = EXPR_NOT; break;
+	case TOK_TILDE: e->tag = EXPR_BIT_NOT; break;
 	default:
-		parse_die("expected `(`, `&`, `+`, `-`, `!`, an integer or a name, but got `%s`", get_token_str(tok));
+		parse_die("expected an expression, but got `%s`", get_token_str(tok));
 		assert(!"unexpected state");
 	}
 	e->left = parse_expr(UNARY_PREC);
@@ -651,20 +719,25 @@ enum expr_tag
 get_binary_expr(enum tok_tag tag, int *prec)
 {
 	switch (tag) {
-	case TOK_BRACKET_L:      *prec = 7; return EXPR_ARRIDX;
-	case TOK_PAREN_L:        *prec = 7; return EXPR_CALL;
+	case TOK_BRACKET_L:      *prec = 11; return EXPR_ARRIDX;
+	case TOK_PAREN_L:        *prec = 11; return EXPR_CALL;
 	                         /* UNARY_PREC is between these */
-	case TOK_PERCENT:        *prec = 6; return EXPR_REM;
-	case TOK_SLASH:          *prec = 6; return EXPR_DIV;
-	case TOK_ASTERISK:       *prec = 6; return EXPR_MUL;
-	case TOK_MINUS:          *prec = 5; return EXPR_SUB;
-	case TOK_PLUS:           *prec = 5; return EXPR_ADD;
-	case TOK_GREATER_EQUALS: *prec = 4; return EXPR_GE;
-	case TOK_GREATER:        *prec = 4; return EXPR_GT;
-	case TOK_LESS_EQUALS:    *prec = 4; return EXPR_LE;
-	case TOK_LESS:           *prec = 4; return EXPR_LT;
-	case TOK_NOT_EQUALS:     *prec = 3; return EXPR_NEQ;
-	case TOK_EQUALS:         *prec = 3; return EXPR_EQ;
+	case TOK_PERCENT:        *prec = 10; return EXPR_REM;
+	case TOK_SLASH:          *prec = 10; return EXPR_DIV;
+	case TOK_ASTERISK:       *prec = 10; return EXPR_MUL;
+	case TOK_MINUS:          *prec = 9; return EXPR_SUB;
+	case TOK_PLUS:           *prec = 9; return EXPR_ADD;
+	case TOK_SHIFT_R:        *prec = 8; return EXPR_BIT_SH_R;
+	case TOK_SHIFT_L:        *prec = 8; return EXPR_BIT_SH_L;
+	case TOK_GREATER_EQUALS: *prec = 7; return EXPR_GE;
+	case TOK_GREATER:        *prec = 7; return EXPR_GT;
+	case TOK_LESS_EQUALS:    *prec = 7; return EXPR_LE;
+	case TOK_LESS:           *prec = 7; return EXPR_LT;
+	case TOK_NOT_EQUALS:     *prec = 6; return EXPR_NEQ;
+	case TOK_EQUALS:         *prec = 6; return EXPR_EQ;
+	case TOK_AMPERSAND:      *prec = 5; return EXPR_BIT_AND;
+	case TOK_CARET:          *prec = 4; return EXPR_BIT_XOR;
+	case TOK_PIPE:           *prec = 3; return EXPR_BIT_OR;
 	case TOK_AND:            *prec = 2; return EXPR_AND;
 	case TOK_OR:             *prec = 1; return EXPR_OR;
 	default:                 *prec = 0; return EXPR_INVALID;
@@ -772,25 +845,20 @@ parse_assign(struct stmt **stmt)
 	next_token();
 	switch (tok.tag) {
 	case TOK_ASSIGN:
-		(*stmt)->tag = STMT_ASSIGN;
-		break;
 	case TOK_ASSIGN_ADD:
-		(*stmt)->tag = STMT_ASSIGN_ADD;
-		break;
 	case TOK_ASSIGN_SUB:
-		(*stmt)->tag = STMT_ASSIGN_SUB;
-		break;
 	case TOK_ASSIGN_MUL:
-		(*stmt)->tag = STMT_ASSIGN_MUL;
-		break;
 	case TOK_ASSIGN_DIV:
-		(*stmt)->tag = STMT_ASSIGN_DIV;
-		break;
 	case TOK_ASSIGN_REM:
-		(*stmt)->tag = STMT_ASSIGN_REM;
+	case TOK_ASSIGN_BIT_SH_L:
+	case TOK_ASSIGN_BIT_SH_R:
+	case TOK_ASSIGN_BIT_AND:
+	case TOK_ASSIGN_BIT_XOR:
+	case TOK_ASSIGN_BIT_OR:
+		(*stmt)->tag = tok.tag - TOK_ASSIGN + STMT_ASSIGN;
 		break;
 	default:
-		parse_die("expected `=`, `+=`, `-=`, `*=`, `/=` or `%=`, but got `%s`", get_token_str(tok));
+		parse_die("expected an assignment, but got `%s`", get_token_str(tok));
 	}
 	(*stmt)->u.ass.rhs = parse_expr(0);
 	next_token();
@@ -933,7 +1001,7 @@ parse_stmt(void)
 			stmt = &(*stmt)->next;
 			break;
 		default:
-			parse_die("expected `}`, `return`, `int`, `if`, `while`, an assignment or a call, but got `%s`",
+			parse_die("expected `}` or a statement, but got `%s`",
 				  get_token_str(tok));
 		}
 		/* handle next statement */
@@ -1078,6 +1146,7 @@ print_expr(struct expr *e, int depth)
 	case EXPR_POS:
 	case EXPR_NEG:
 	case EXPR_NOT:
+	case EXPR_BIT_NOT:
 		fputs(get_token_str(e->tok), stdout);
 		fputs("(", stdout);
 		print_expr(e->left, depth);
@@ -1088,12 +1157,17 @@ print_expr(struct expr *e, int depth)
 	case EXPR_MUL:
 	case EXPR_SUB:
 	case EXPR_ADD:
+	case EXPR_BIT_SH_R:
+	case EXPR_BIT_SH_L:
 	case EXPR_GE:
 	case EXPR_GT:
 	case EXPR_LE:
 	case EXPR_LT:
 	case EXPR_NEQ:
 	case EXPR_EQ:
+	case EXPR_BIT_AND:
+	case EXPR_BIT_XOR:
+	case EXPR_BIT_OR:
 	case EXPR_AND:
 	case EXPR_OR:
 		if (depth)
@@ -1169,8 +1243,13 @@ print_stmt(struct stmt *stmt, int indent)
 	case STMT_ASSIGN_MUL:
 	case STMT_ASSIGN_DIV:
 	case STMT_ASSIGN_REM:
+	case STMT_ASSIGN_BIT_SH_L:
+	case STMT_ASSIGN_BIT_SH_R:
+	case STMT_ASSIGN_BIT_AND:
+	case STMT_ASSIGN_BIT_XOR:
+	case STMT_ASSIGN_BIT_OR:
 		print_expr(stmt->u.ass.lhs, 0);
-		printf(" %.3s", &" = += -= *= /= %= "[(stmt->tag - STMT_ASSIGN) * 3]);
+		printf(" %.3s ", &" = += -= *= /= %= <<=>>=&= ^= |= "[(stmt->tag - STMT_ASSIGN) * 3]);
 		print_expr(stmt->u.ass.rhs, 0);
 		printf(";\t# %d:%d:%d\n",
 		       stmt->tok.line,
@@ -1258,6 +1337,7 @@ print_program(struct ast a)
 int
 eval(int argc, const char **argv)
 {
+	assert((int64_t)-1 == ~0);
 	return 0;
 }
 
