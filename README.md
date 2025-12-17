@@ -4,14 +4,14 @@
 #!/usr/bin/env proc
 
 proc main(argc, argv) {
-    # all variables are C `int64_t` integers
+    # the only data type is signed 64-bit integer
     int memo[92]; # zeroed out by default
     if (argc != 2) {
         return 1;
     }
     PutInt(fibonacci(StrToInt(argv[1]), memo));
     PutChar(10); # newline
-    # in absence of the return statement, "return 0;" is implied for all procedures
+    # in absence of the return statement, "return 0;" is implied here
 }
 
 proc fibonacci(n, memo) { # arguments are passed by value (memo is a pointer)

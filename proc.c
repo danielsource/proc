@@ -4,11 +4,13 @@
 
 #include <stddef.h>
 #include <limits.h>
+#include <inttypes.h>
 #include <assert.h>
 #include <stdarg.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <time.h>
 
 #define VERSION "WIP -- https://github.com/danielsource/proc -- public domain"
 #define TOKEN_BUF_SIZE (64)
@@ -17,10 +19,9 @@
 #define WORDS_SIZE (500*1000)
 #define UNARY_PREC 10
 
-#define STATIC_ASSERT(x) int STATIC_ASSERT(int [(x)?1:-1])
 #define ROUND_UP(n, to) (((n) + ((to) - 1)) & ~((to) - 1))
 #define LENGTH(x) ((int)(sizeof(x) / sizeof((x)[0])))
-#define DEREF(v) (v.deref = v.deref ? (v.i = words[v.i], 0) : 0);
+#define DEREF(v) (v.deref = v.deref ? (v.i = words[v.i], 0) : 0)
 
 /* assumes ASCII */
 #define IS_SPACE(c) (((c) >= 0 && (c) <= 32) || (c) == 127)
@@ -30,14 +31,6 @@
 #define IS_ALNUM(c) (IS_DIGIT(c) || IS_ALPHA(c))
 #define IS_IDENT1(c) (IS_ALPHA(c) || (c) == '_') /* A-Za-z_ */
 #define IS_IDENT2(c) (IS_ALNUM(c) || (c) == '_') /* A-Za-z_0-9 */
-
-#ifdef _WIN32
-	typedef long long i64;
-	#define I64d "lld"
-#else
-	typedef long i64;
-	#define I64d "ld"
-#endif
 
 struct bumpalloc {
 	char *beg, *top, *end;
@@ -65,6 +58,7 @@ enum tok_tag {
 	TOK_PERCENT,
 	TOK_SLASH,
 	TOK_ASTERISK,
+	TOK_ASTERISK2,
 	TOK_GREATER,
 	TOK_GREATER_EQUALS,
 	TOK_LESS,
@@ -100,7 +94,7 @@ struct token {
 	enum tok_tag tag;
 	int line, col, col_end;
 	union {
-		i64 i;
+		int64_t i;
 		const char *name;
 	} u;
 };
@@ -129,6 +123,7 @@ enum expr_tag {
 	EXPR_NEG,
 	EXPR_NOT,
 	EXPR_BIT_NOT,
+	EXPR_POW,
 	EXPR_REM,
 	EXPR_DIV,
 	EXPR_MUL,
@@ -140,7 +135,7 @@ enum expr_tag {
 	EXPR_GT,
 	EXPR_LE,
 	EXPR_LT,
-	EXPR_NEQ,
+	EXPR_NE,
 	EXPR_EQ,
 	EXPR_BIT_AND,
 	EXPR_BIT_XOR,
@@ -179,16 +174,6 @@ enum stmt_tag {
 	STMT_RETURN,
 	STMT_DECL,
 	STMT_ASSIGN,
-	STMT_ASSIGN_ADD,
-	STMT_ASSIGN_SUB,
-	STMT_ASSIGN_MUL,
-	STMT_ASSIGN_DIV,
-	STMT_ASSIGN_REM,
-	STMT_ASSIGN_BIT_SH_L,
-	STMT_ASSIGN_BIT_SH_R,
-	STMT_ASSIGN_BIT_AND,
-	STMT_ASSIGN_BIT_XOR,
-	STMT_ASSIGN_BIT_OR,
 	STMT_CALL,
 	STMT_SELECT,
 	STMT_LOOP
@@ -215,7 +200,7 @@ struct var {
 };
 
 struct val {
-	i64 i;
+	int64_t i;
 	int deref, ret;
 };
 
@@ -232,7 +217,7 @@ struct bumpalloc parse_alloc;
 char eval_data[EVAL_DATA_SIZE];
 struct bumpalloc eval_alloc;
 
-i64 words[WORDS_SIZE];
+int64_t words[WORDS_SIZE];
 int words_top;
 
 struct token tok = {TOK_START};
@@ -243,11 +228,8 @@ struct ast ast;
 
 struct var *globals;
 
-/* compile-time assertions */
-
-STATIC_ASSERT(sizeof(int) >= 4);
-STATIC_ASSERT(sizeof(i64) >= 8);
-STATIC_ASSERT((i64)-1 == ~0);
+int compiletime_assert1(int [sizeof(int) >= 4  ?1:-1]);
+int compiletime_assert2(int [(int64_t)-1 == ~0 ?1:-1]);
 
 /* implementation */
 
@@ -341,10 +323,10 @@ eval_die(struct token *t, const char *msg, ...)
 	exit(3);
 }
 
-i64
+int64_t
 str_to_int(const char *digits)
 {
-	i64 n = 0, sign = 1, base = 10, digitval;
+	int64_t n = 0, sign = 1, base = 10, digitval;
 	const char *s;
 
 	s = digits;
@@ -379,17 +361,17 @@ str_to_int(const char *digits)
 			goto invalid_int_lit;
 		if (digitval >= base)
 			goto invalid_int_lit;
-		if (n > LONG_MAX / base)
-			parse_die("integer literal too large `%s` [A]", digits);
+		if (n > INT64_MAX / base)
+			parse_die("integer literal too large: `%s` [A]", digits);
 		n *= base;
-		if (n > LONG_MAX - digitval)
-			parse_die("integer literal too large `%s` [B]", digits);
+		if (n > INT64_MAX - digitval)
+			parse_die("integer literal too large: `%s` [B]", digits);
 		n += digitval;
 		++s;
 	}
 	return n * sign;
 invalid_int_lit:
-	parse_die("invalid integer literal `%s`", digits);
+	parse_die("invalid integer literal: `%s`", digits);
 	return 0;
 }
 
@@ -403,7 +385,7 @@ get_token_str(struct token t)
 	case TOK_INT:
 		if (t.line > 0 && t.col > 0) {
 			s = alloc(&parse_alloc, TOKEN_BUF_SIZE);
-			sprintf(s, "%"I64d, t.u.i);
+			sprintf(s, "%"PRId64, t.u.i);
 			return s;
 		}
 		return "<integer>";
@@ -425,6 +407,7 @@ get_token_str(struct token t)
 	case TOK_PERCENT: return "%";
 	case TOK_SLASH: return "/";
 	case TOK_ASTERISK: return "*";
+	case TOK_ASTERISK2: return "**";
 	case TOK_GREATER: return ">";
 	case TOK_GREATER_EQUALS: return ">=";
 	case TOK_LESS: return "<";
@@ -524,7 +507,7 @@ next_token(void)
 		buf[i] = 0;
 		if (i == LENGTH(buf) - 1)
 invalid_int_lit:
-			parse_die("invalid integer literal `%s...`", buf);
+			parse_die("invalid integer literal: `%s...`", buf);
 		tok.tag = TOK_INT;
 		tok.u.i = str_to_int(buf);
 		col += i - 1;
@@ -536,7 +519,7 @@ invalid_int_lit:
 		}
 		buf[i] = 0;
 		if (i == LENGTH(buf) - 1)
-			parse_die("invalid name `%s...`", buf);
+			parse_die("invalid name: `%s...`", buf);
 		if (!strcmp(buf, "return")) {
 			tok.tag = TOK_RETURN;
 		} else if (!strcmp(buf, "int")) {
@@ -676,6 +659,10 @@ invalid_char_lit:
 			tok.tag = TOK_ASSIGN_MUL;
 			++col;
 			goto end_consuming;
+		} else if (c == '*') {
+			tok.tag = TOK_ASTERISK2;
+			++col;
+			goto end_consuming;
 		}
 		goto end;
 	case '>':
@@ -722,11 +709,11 @@ invalid_char_lit:
 		if (c == EOF)
 			parse_die("unexpected end-of-file");
 		else if (c > 127)
-			parse_die("script contains non-ASCII character %d;\n"
+			parse_die("script contains non-ASCII character: %d;\n"
 				  "... this can happen when copying text from websites, PDFs, etc.",
 				  c);
 		else
-			parse_die("unexpected character %c%c%c (%d)",
+			parse_die("unexpected character: %c%c%c (%d)",
 				  c=='`'?'\'':'`', c, c=='`'?'\'':'`', c);
 	}
 end:
@@ -787,8 +774,9 @@ enum expr_tag
 get_binary_expr(enum tok_tag tag, int *prec)
 {
 	switch (tag) {
-	case TOK_BRACKET_L:      *prec = 11; return EXPR_ARRIDX;
-	case TOK_PAREN_L:        *prec = 11; return EXPR_CALL;
+	case TOK_BRACKET_L:      *prec = 12; return EXPR_ARRIDX;
+	case TOK_PAREN_L:        *prec = 12; return EXPR_CALL;
+	case TOK_ASTERISK2:      *prec = 11; return EXPR_POW;
 	                         /* UNARY_PREC is between these */
 	case TOK_PERCENT:        *prec = 10; return EXPR_REM;
 	case TOK_SLASH:          *prec = 10; return EXPR_DIV;
@@ -801,7 +789,7 @@ get_binary_expr(enum tok_tag tag, int *prec)
 	case TOK_GREATER:        *prec = 7; return EXPR_GT;
 	case TOK_LESS_EQUALS:    *prec = 7; return EXPR_LE;
 	case TOK_LESS:           *prec = 7; return EXPR_LT;
-	case TOK_NOT_EQUALS:     *prec = 6; return EXPR_NEQ;
+	case TOK_NOT_EQUALS:     *prec = 6; return EXPR_NE;
 	case TOK_EQUALS:         *prec = 6; return EXPR_EQ;
 	case TOK_AMPERSAND:      *prec = 5; return EXPR_BIT_AND;
 	case TOK_CARET:          *prec = 4; return EXPR_BIT_XOR;
@@ -828,11 +816,13 @@ parse_binary_expr(struct expr *left, int minprec)
 	}
 	op = tok;
 	if (tag == EXPR_ARRIDX) {
-		right = parse_expr(prec);
+		right = parse_expr(0);
 		next_token();
 		if (tok.tag != TOK_BRACKET_R)
 			parse_die("expected `]`, but got `%s`", get_token_str(tok));
 	} else if (tag == EXPR_CALL) {
+		if (left->tag != EXPR_NAME)
+			parse_die("expected a procedure name, but got `%s` expression", get_token_str(left->tok));
 		arg = &right;
 		next_token();
 		while (tok.tag != TOK_PAREN_R) {
@@ -848,6 +838,8 @@ parse_binary_expr(struct expr *left, int minprec)
 			else if (tok.tag != TOK_PAREN_R)
 				parse_die("expected `)` or `,`, but got `%s`", get_token_str(tok));
 		}
+	} else if (tag == EXPR_POW) { /* right-associative exponentiation */
+		right = parse_expr(prec - 1);
 	} else {
 		right = parse_expr(prec);
 	}
@@ -912,25 +904,70 @@ void
 parse_assign(struct stmt **stmt)
 {
 	(*stmt)->u.ass.lhs = parse_expr(0);
+	(*stmt)->tag = STMT_ASSIGN;
 	next_token();
 	switch (tok.tag) {
 	case TOK_ASSIGN:
+		(*stmt)->u.ass.rhs = parse_expr(0);
+		break;
 	case TOK_ASSIGN_ADD:
+		tok.tag = TOK_PLUS;
+		(*stmt)->u.ass.rhs = alloc(&parse_alloc, sizeof(struct expr));
+		(*stmt)->u.ass.rhs->tag = EXPR_ADD;
+		goto assign_op;
 	case TOK_ASSIGN_SUB:
+		tok.tag = TOK_MINUS;
+		(*stmt)->u.ass.rhs = alloc(&parse_alloc, sizeof(struct expr));
+		(*stmt)->u.ass.rhs->tag = EXPR_SUB;
+		goto assign_op;
 	case TOK_ASSIGN_MUL:
+		tok.tag = TOK_ASTERISK;
+		(*stmt)->u.ass.rhs = alloc(&parse_alloc, sizeof(struct expr));
+		(*stmt)->u.ass.rhs->tag = EXPR_MUL;
+		goto assign_op;
 	case TOK_ASSIGN_DIV:
+		tok.tag = TOK_SLASH;
+		(*stmt)->u.ass.rhs = alloc(&parse_alloc, sizeof(struct expr));
+		(*stmt)->u.ass.rhs->tag = EXPR_DIV;
+		goto assign_op;
 	case TOK_ASSIGN_REM:
+		tok.tag = TOK_PERCENT;
+		(*stmt)->u.ass.rhs = alloc(&parse_alloc, sizeof(struct expr));
+		(*stmt)->u.ass.rhs->tag = EXPR_REM;
+		goto assign_op;
 	case TOK_ASSIGN_BIT_SH_L:
+		tok.tag = TOK_SHIFT_L;
+		(*stmt)->u.ass.rhs = alloc(&parse_alloc, sizeof(struct expr));
+		(*stmt)->u.ass.rhs->tag = EXPR_BIT_SH_L;
+		goto assign_op;
 	case TOK_ASSIGN_BIT_SH_R:
+		tok.tag = TOK_SHIFT_R;
+		(*stmt)->u.ass.rhs = alloc(&parse_alloc, sizeof(struct expr));
+		(*stmt)->u.ass.rhs->tag = EXPR_BIT_SH_R;
+		goto assign_op;
 	case TOK_ASSIGN_BIT_AND:
+		tok.tag = TOK_AMPERSAND;
+		(*stmt)->u.ass.rhs = alloc(&parse_alloc, sizeof(struct expr));
+		(*stmt)->u.ass.rhs->tag = EXPR_BIT_AND;
+		goto assign_op;
 	case TOK_ASSIGN_BIT_XOR:
+		tok.tag = TOK_CARET;
+		(*stmt)->u.ass.rhs = alloc(&parse_alloc, sizeof(struct expr));
+		(*stmt)->u.ass.rhs->tag = EXPR_BIT_XOR;
+		goto assign_op;
 	case TOK_ASSIGN_BIT_OR:
-		(*stmt)->tag = tok.tag - TOK_ASSIGN + STMT_ASSIGN;
+		tok.tag = TOK_PIPE;
+		(*stmt)->u.ass.rhs = alloc(&parse_alloc, sizeof(struct expr));
+		(*stmt)->u.ass.rhs->tag = EXPR_BIT_OR;
+		goto assign_op;
+assign_op:
+		(*stmt)->u.ass.rhs->tok = tok;
+		(*stmt)->u.ass.rhs->left = (*stmt)->u.ass.lhs;
+		(*stmt)->u.ass.rhs->right = parse_expr(0);
 		break;
 	default:
 		parse_die("expected an assignment, but got `%s`", get_token_str(tok));
 	}
-	(*stmt)->u.ass.rhs = parse_expr(0);
 	next_token();
 	if (tok.tag != TOK_SEMICOLON)
 		parse_die("expected `;`, but got `%s`", get_token_str(tok));
@@ -1122,7 +1159,7 @@ parse_proc(void)
 		param->tag = STMT_DECL;
 		param->tok = tok;
 		if (get_decl(proc->params, tok.u.name))
-			parse_die("procedure `%s` contains redeclaration of parameter `%s`",
+			parse_die("parameter redeclaration: `%s` in procedure `%s`",
 				  proc->tok.u.name, tok.u.name);
 		if (proc->params)
 			param->next = proc->params;
@@ -1165,7 +1202,7 @@ parse(void)
 		case TOK_PROC:
 			proc = parse_proc();
 			if (get_proc(ast.procs, proc->tok.u.name))
-				parse_die("procedure `%s` redefinition",
+				parse_die("procedure redefinition: `%s`",
 					  proc->tok.u.name);
 			if (ast.procs)
 				proc->next = ast.procs;
@@ -1204,8 +1241,6 @@ print_expr(struct expr *e, int depth)
 			fputs(")", stdout);
 		break;
 	case EXPR_CALL:
-		if (depth)
-			fputs("(", stdout);
 		print_expr(e->left, depth + 1);
 		fputs("(", stdout);
 		if (e->right) {
@@ -1216,8 +1251,6 @@ print_expr(struct expr *e, int depth)
 			print_expr(arg->left, 0);
 		}
 		fputs(")", stdout);
-		if (depth)
-			fputs(")", stdout);
 		break;
 	case EXPR_ADDROF:
 	case EXPR_POS:
@@ -1233,6 +1266,17 @@ print_expr(struct expr *e, int depth)
 		if (depth)
 			fputs(")", stdout);
 		break;
+	case EXPR_POW:
+		if (depth)
+			fputs("(", stdout);
+		print_expr(e->left, depth + 1);
+		fputs(" ", stdout);
+		fputs(get_token_str(e->tok), stdout);
+		fputs(" ", stdout);
+		print_expr(e->right, depth + 1);
+		if (depth)
+			fputs(")", stdout);
+		break;
 	case EXPR_REM:
 	case EXPR_DIV:
 	case EXPR_MUL:
@@ -1244,7 +1288,7 @@ print_expr(struct expr *e, int depth)
 	case EXPR_GT:
 	case EXPR_LE:
 	case EXPR_LT:
-	case EXPR_NEQ:
+	case EXPR_NE:
 	case EXPR_EQ:
 	case EXPR_BIT_AND:
 	case EXPR_BIT_XOR:
@@ -1319,18 +1363,8 @@ print_stmt(struct stmt *stmt, int indent)
 		print_stmt(stmt->next, indent);
 		return;
 	case STMT_ASSIGN:
-	case STMT_ASSIGN_ADD:
-	case STMT_ASSIGN_SUB:
-	case STMT_ASSIGN_MUL:
-	case STMT_ASSIGN_DIV:
-	case STMT_ASSIGN_REM:
-	case STMT_ASSIGN_BIT_SH_L:
-	case STMT_ASSIGN_BIT_SH_R:
-	case STMT_ASSIGN_BIT_AND:
-	case STMT_ASSIGN_BIT_XOR:
-	case STMT_ASSIGN_BIT_OR:
 		print_expr(stmt->u.ass.lhs, 0);
-		printf(" %.3s ", &" = += -= *= /= %= <<=>>=&= ^= |= "[(stmt->tag - STMT_ASSIGN) * 3]);
+		fputs(" = ", stdout);
 		print_expr(stmt->u.ass.rhs, 0);
 		printf(";\t# %d:%d:%d\n",
 		       stmt->tok.line,
@@ -1383,32 +1417,33 @@ print_stmt(struct stmt *stmt, int indent)
 void
 print_program(struct ast a)
 {
-	struct stmt *globdecl, *par;
+	struct stmt *gdecl, *par;
 	struct proc *proc;
 
+	fputs("================\n", stdout);
 	if (a.globals)
 		fputs("# globals\n", stdout);
-	for (globdecl = a.globals; globdecl; globdecl = globdecl->next) {
-		if (globdecl->u.decl.elems) {
-			printf("int %s[", globdecl->tok.u.name);
-			print_expr(globdecl->u.decl.elems, 0);
+	for (gdecl = a.globals; gdecl; gdecl = gdecl->next) {
+		if (gdecl->u.decl.elems) {
+			printf("int %s[", gdecl->tok.u.name);
+			print_expr(gdecl->u.decl.elems, 0);
 			fputs("];", stdout);
-		} else if (globdecl->u.decl.expr) {
-			printf("int %s = ", globdecl->tok.u.name);
-			print_expr(globdecl->u.decl.expr, 0);
+		} else if (gdecl->u.decl.expr) {
+			printf("int %s = ", gdecl->tok.u.name);
+			print_expr(gdecl->u.decl.expr, 0);
 			fputs(";", stdout);
 		} else {
-			printf("int %s;", globdecl->tok.u.name);
+			printf("int %s;", gdecl->tok.u.name);
 		}
 		printf(" # %d:%d:%d\n",
-		       globdecl->tok.line,
-		       globdecl->tok.col,
-		       globdecl->tok.col_end);
+		       gdecl->tok.line,
+		       gdecl->tok.col,
+		       gdecl->tok.col_end);
 	}
 	if (a.globals)
 		fputs("\n", stdout);
 	if (a.procs)
-		fputs("# procedures (procedures/parameters are reversed)\n", stdout);
+		fputs("# procedures (procedures/parameters are printed reversed)\n", stdout);
 	for (proc = a.procs; proc; proc = proc->next) {
 		printf("proc %s(", proc->tok.u.name);
 		if (proc->params) {
@@ -1424,80 +1459,355 @@ print_program(struct ast a)
 		print_stmt(proc->body, 1);
 		fputs("}\n", stdout);
 	}
+	fputs("================\n", stdout);
+}
+
+struct var *
+get_var(struct var *locs, const char *name)
+{
+	struct var *var;
+
+	for (var = locs; var; var = var->next)
+		if (!strcmp(var->tok->u.name, name))
+			return var;
+	for (var = globals; var; var = var->next)
+		if (!strcmp(var->tok->u.name, name))
+			return var;
+	return NULL;
 }
 
 int
-push_word(i64 x)
+push_word(struct token *t, int64_t x)
 {
 	int addr;
 
 	if (words_top + 1 > WORDS_SIZE)
-		eval_die(NULL, "word stack overflow");
+		eval_die(t, "word stack overflow");
 	addr = words_top++;
 	words[addr] = x;
 	return addr;
 }
 
+int
+push_arr(struct token *t, int n)
+{
+	int addr;
+
+	if (n < 1)
+		eval_die(t, "array size < 1 (%d)", n);
+	if (words_top + n > WORDS_SIZE)
+		eval_die(t, "word stack overflow: too large array (%d)", n);
+	addr = words_top;
+	words_top += n;
+	return addr;
+}
+
+uint64_t
+power(uint64_t base, uint64_t exp)
+{
+	uint64_t res = 1;
+
+	while (exp > 0) {
+		if (exp & 1)
+			res *= base;
+		base *= base;
+		exp >>= 1;
+	}
+	return res;
+}
+
+struct val
+builtin_str_to_int(struct var *locs, struct expr *e)
+{
+	struct val v = {0};
+	const char *s;
+	/* XXX */
+	memset(&tok, 0, sizeof(tok));
+	v.i = str_to_int(s);
+	return v;
+}
+
+struct val
+builtin_put_int(struct var *locs, struct expr *e)
+{
+	struct val v = {0};
+	/* XXX */
+	return v;
+}
+
+struct val
+builtin_put_char(struct var *locs, struct expr *e)
+{
+	struct val v = {0};
+	/* XXX */
+	return v;
+}
+
+struct val
+builtin_get_char(struct var *locs, struct expr *e)
+{
+	struct val v = {0};
+	/* XXX */
+	return v;
+}
+
+struct val
+builtin_random(struct var *locs, struct expr *e)
+{
+	struct val v = {0};
+	/* XXX */
+	return v;
+}
+
+struct val
+builtin_exit(struct var *locs, struct expr *e)
+{
+	struct val v = {0};
+	/* XXX */
+	return v;
+}
+
+struct val
+builtin_assert(struct var *locs, struct expr *e)
+{
+	struct val v = {0};
+	/* XXX */
+	return v;
+}
+
+struct val eval_expr(struct var *locs, struct expr *e, int constexpr);
+struct val eval_stmt(struct var *locs, struct stmt *stmt);
+
+const struct {
+	const char *name;
+	struct val (*proc)(struct var *, struct expr *);
+} builtins[] = {
+	{"StrToInt", builtin_str_to_int},
+	{"PutInt", builtin_put_int},
+	{"PutChar", builtin_put_char},
+	{"GetChar", builtin_get_char},
+	{"Rand", builtin_random},
+	{"Exit", builtin_exit},
+	{"Assert", builtin_assert},
+};
+
+struct val
+eval_call(struct var *locs, struct expr *e)
+{
+	struct val v = {0};
+	struct proc *proc;
+	struct expr *procexpr, *args, *a;
+	const char *procname;
+	int i;
+
+	assert(e->tag == EXPR_CALL);
+	assert(e->right->tag == EXPR_ARGS);
+	procexpr = e->left;
+	procname = procexpr->tok.u.name;
+	args = e->right;
+	proc = get_proc(ast.procs, procname);
+	if (!proc) {
+		for (i = 0; i < LENGTH(builtins); ++i)
+			if (!strcmp(procname, builtins[i].name))
+				return builtins[i].proc(locs, e);
+		eval_die(&procexpr->tok, "procedure undefined: `%s`", procname);
+	}
+	v = eval_stmt(locs, proc->body); DEREF(v);
+	/* XXX dealloc */
+	return v;
+}
+
 struct val
 eval_expr(struct var *locs, struct expr *e, int constexpr)
 {
-	struct val v = {0};
+	struct val v = {0}, w = {0};
+	struct var *var;
 	struct expr *arg;
+	struct proc *proc;
+	union typepunning {
+		int64_t u;
+		int64_t i;
+	} tp;
 
 	switch (e->tag) {
 	case EXPR_INT:
+		v.i = e->tok.u.i;
+		break;
 	case EXPR_NAME:
-		assert(!"not implemented"); /* XXX */
+		var = get_var(locs, e->tok.u.name);
+		if (!var)
+			eval_die(&e->tok, "variable undefined: `%s`", e->tok.u.name);
+		v.i = var->addr;
+		v.deref = 1;
+		dlog(__LINE__, "variable access: address=%"PRId64" value=%"PRId64,
+		     v.i, (v.i >= 0 && v.i < WORDS_SIZE) ? words[v.i] : 0);
 		break;
 	case EXPR_ARRIDX:
-		assert(!"not implemented"); /* XXX */
-		eval_expr(locs, e->left, constexpr);
-		eval_expr(locs, e->right, constexpr);
+		v = eval_expr(locs, e->left, constexpr);
+		w = eval_expr(locs, e->right, constexpr); DEREF(w);
+		if (!v.deref)
+			eval_die(&e->tok, "cannot subscript non-variable");
+		if (v.i < 0 || v.i >= WORDS_SIZE)
+			eval_die(&e->tok, "out of bounds word access (%"PRId64") [A]", v.i);
+		tp.u = (uint64_t)words[v.i] + (uint64_t)w.i;
+		if (tp.i < 0 || tp.i >= WORDS_SIZE)
+			eval_die(&e->tok, "out of bounds word access (%"PRId64") [B]", tp.i);
+		v.i = tp.i;
 		break;
 	case EXPR_CALL:
-		assert(!"not implemented"); /* XXX */
 		if (constexpr)
 			eval_die(&e->tok, "expression is not constant");
-		eval_expr(locs, e->left, 0);
-		if (e->right) {
-			for (arg = e->right; arg; arg = arg->right) {
-				eval_expr(locs, arg->left, 0);
-			}
-		}
+		v = eval_call(locs, e); DEREF(v);
 		break;
 	case EXPR_ADDROF:
+		v = eval_expr(locs, e->left, constexpr);
+		if (!v.deref)
+			eval_die(&e->tok, "cannot get address of non-variable");
+		v.deref = 0;
+		break;
 	case EXPR_POS:
+		v = eval_expr(locs, e->left, constexpr); DEREF(v);
+		break;
 	case EXPR_NEG:
+		v = eval_expr(locs, e->left, constexpr); DEREF(v);
+		v.i = -v.i;
+		break;
 	case EXPR_NOT:
+		v = eval_expr(locs, e->left, constexpr); DEREF(v);
+		v.i = !v.i;
+		break;
 	case EXPR_BIT_NOT:
-		assert(!"not implemented"); /* XXX */
-		eval_expr(locs, e->left, constexpr);
+		v = eval_expr(locs, e->left, constexpr); DEREF(v);
+		v.i = ~v.i;
+		break;
+	case EXPR_POW:
+		v = eval_expr(locs, e->left, constexpr); DEREF(v);
+		w = eval_expr(locs, e->right, constexpr); DEREF(w);
+		if (v.i < 0 || w.i < 0)
+			eval_die(&e->tok, "cannot use `%s` with negative operand",
+				 get_token_str(e->tok));
+		tp.u = power(v.i, w.i);
+		v.i = tp.i;
 		break;
 	case EXPR_REM:
+		v = eval_expr(locs, e->left, constexpr); DEREF(v);
+		w = eval_expr(locs, e->right, constexpr); DEREF(w);
+		if (w.i == 0)
+			goto div_by_zero;
+		tp.u = (uint64_t)v.i % (uint64_t)w.i;
+		v.i = tp.i;
+		break;
 	case EXPR_DIV:
+		v = eval_expr(locs, e->left, constexpr); DEREF(v);
+		w = eval_expr(locs, e->right, constexpr); DEREF(w);
+		if (w.i == 0)
+			goto div_by_zero;
+		tp.u = (uint64_t)v.i / (uint64_t)w.i;
+		v.i = tp.i;
+		break;
 	case EXPR_MUL:
+		v = eval_expr(locs, e->left, constexpr); DEREF(v);
+		w = eval_expr(locs, e->right, constexpr); DEREF(w);
+		tp.u = (uint64_t)v.i * (uint64_t)w.i;
+		v.i = tp.i;
+		break;
 	case EXPR_SUB:
+		v = eval_expr(locs, e->left, constexpr); DEREF(v);
+		w = eval_expr(locs, e->right, constexpr); DEREF(w);
+		tp.u = (uint64_t)v.i - (uint64_t)w.i;
+		v.i = tp.i;
+		break;
 	case EXPR_ADD:
+		v = eval_expr(locs, e->left, constexpr); DEREF(v);
+		w = eval_expr(locs, e->right, constexpr); DEREF(w);
+		tp.u = (uint64_t)v.i + (uint64_t)w.i;
+		v.i = tp.i;
+		break;
 	case EXPR_BIT_SH_R:
+		v = eval_expr(locs, e->left, constexpr); DEREF(v);
+		w = eval_expr(locs, e->right, constexpr); DEREF(w);
+		if (w.i >= 0 && w.i <= 63) {
+			tp.u = (uint64_t)v.i >> (uint64_t)w.i;
+			v.i = tp.i;
+		} else {
+			v.i = 0;
+		}
+		break;
 	case EXPR_BIT_SH_L:
+		v = eval_expr(locs, e->left, constexpr); DEREF(v);
+		w = eval_expr(locs, e->right, constexpr); DEREF(w);
+		if (w.i >= 0 && w.i <= 63) {
+			tp.u = (uint64_t)v.i << (uint64_t)w.i;
+			v.i = tp.i;
+		} else {
+			v.i = 0;
+		}
+		break;
 	case EXPR_GE:
+		v = eval_expr(locs, e->left, constexpr); DEREF(v);
+		w = eval_expr(locs, e->right, constexpr); DEREF(w);
+		v.i = v.i >= w.i;
+		break;
 	case EXPR_GT:
+		v = eval_expr(locs, e->left, constexpr); DEREF(v);
+		w = eval_expr(locs, e->right, constexpr); DEREF(w);
+		v.i = v.i > w.i;
+		break;
 	case EXPR_LE:
+		v = eval_expr(locs, e->left, constexpr); DEREF(v);
+		w = eval_expr(locs, e->right, constexpr); DEREF(w);
+		v.i = v.i <= w.i;
+		break;
 	case EXPR_LT:
-	case EXPR_NEQ:
+		v = eval_expr(locs, e->left, constexpr); DEREF(v);
+		w = eval_expr(locs, e->right, constexpr); DEREF(w);
+		v.i = v.i < w.i;
+		break;
+	case EXPR_NE:
+		v = eval_expr(locs, e->left, constexpr); DEREF(v);
+		w = eval_expr(locs, e->right, constexpr); DEREF(w);
+		v.i = v.i != w.i;
+		break;
 	case EXPR_EQ:
+		v = eval_expr(locs, e->left, constexpr); DEREF(v);
+		w = eval_expr(locs, e->right, constexpr); DEREF(w);
+		v.i = v.i == w.i;
+		break;
 	case EXPR_BIT_AND:
+		v = eval_expr(locs, e->left, constexpr); DEREF(v);
+		w = eval_expr(locs, e->right, constexpr); DEREF(w);
+		v.i &= w.i;
+		break;
 	case EXPR_BIT_XOR:
+		v = eval_expr(locs, e->left, constexpr); DEREF(v);
+		w = eval_expr(locs, e->right, constexpr); DEREF(w);
+		v.i ^= w.i;
+		break;
 	case EXPR_BIT_OR:
+		v = eval_expr(locs, e->left, constexpr); DEREF(v);
+		w = eval_expr(locs, e->right, constexpr); DEREF(w);
+		v.i |= w.i;
+		break;
 	case EXPR_AND:
+		v = eval_expr(locs, e->left, constexpr); DEREF(v);
+		if (v.i) { /* short-circuit */
+			w = eval_expr(locs, e->right, constexpr); DEREF(w);
+			v.i = v.i && w.i;
+		}
+		break;
 	case EXPR_OR:
-		assert(!"not implemented"); /* XXX */
-		eval_expr(locs, e->left, constexpr);
-		eval_expr(locs, e->right, constexpr);
+		v = eval_expr(locs, e->left, constexpr); DEREF(v);
+		if (!v.i) { /* short-circuit */
+			w = eval_expr(locs, e->right, constexpr); DEREF(w);
+			v.i = v.i && w.i;
+		}
 		break;
 	default:
 		assert(!"unexpected state");
 	}
+	return v;
+div_by_zero:
+	eval_die(&e->tok, "cannot divide by zero");
 	return v;
 }
 
@@ -1506,29 +1816,18 @@ eval_stmt(struct var *locs, struct stmt *stmt)
 {
 	struct val v = {0};
 
-	while (1) {
+	while (stmt) {
 		switch (stmt->tag) {
 		case STMT_RETURN:
 			if (stmt->u.expr) {
-				v = eval_expr(locs, stmt->u.expr, 0);
-				DEREF(v);
+				v = eval_expr(locs, stmt->u.expr, 0); DEREF(v);
 			}
-			v.ret = 1;
+			v.ret = 1; /* flag to return early */
 			return v;
 		case STMT_DECL:
 			assert(!"not implemented"); /* XXX */
 			break;
 		case STMT_ASSIGN:
-		case STMT_ASSIGN_ADD:
-		case STMT_ASSIGN_SUB:
-		case STMT_ASSIGN_MUL:
-		case STMT_ASSIGN_DIV:
-		case STMT_ASSIGN_REM:
-		case STMT_ASSIGN_BIT_SH_L:
-		case STMT_ASSIGN_BIT_SH_R:
-		case STMT_ASSIGN_BIT_AND:
-		case STMT_ASSIGN_BIT_XOR:
-		case STMT_ASSIGN_BIT_OR:
 			assert(!"not implemented"); /* XXX */
 			break;
 		case STMT_CALL:
@@ -1552,52 +1851,87 @@ int
 eval(int argc, const char **argv)
 {
 	struct proc *mainproc;
-	struct stmt *params;
+	struct stmt *params, *gdecl;
 	struct val v = {0};
-	struct var *locs = NULL;
-	int i, j, base, off;
+	struct var *locs = NULL, *g;
+	int i, j, base, off = 0, globwords = 0;
+	char *prev_eval_top;
+	clock_t clkbeg, clkend;
 
 	dlog(__LINE__, "evaluating...");
+	prev_eval_top = eval_alloc.top;
 	mainproc = get_proc(ast.procs, "main");
 	if (!mainproc)
 		eval_die(NULL, "missing procedure `main`");
 	params = mainproc->params;
-	base = push_word(0);
-	/* XXX eval_globals */
-	/* (argc, argv) handling */
+	base = push_word(NULL, 0);
+	/* initialize globals */
+	for (gdecl = ast.globals; gdecl; gdecl = gdecl->next) {
+		g = alloc(&eval_alloc, sizeof(*g));
+		g->tok = &gdecl->tok;
+		if (gdecl->u.decl.elems) {
+			v = eval_expr(NULL, gdecl->u.decl.elems, 1); DEREF(v);
+			g->addr = push_arr(g->tok, v.i);
+			g->elems = v.i;
+			globwords += v.i;
+		} else if (gdecl->u.decl.expr) {
+			v = eval_expr(NULL, gdecl->u.decl.expr, 1); DEREF(v);
+			g->addr = push_word(g->tok, v.i);
+			++globwords;
+		} else {
+			g->addr = push_word(g->tok, 0);
+			++globwords;
+		}
+		if (globals)
+			g->next = globals;
+		globals = g;
+		dlog(__LINE__, "global{name=%s,value=%d,elems=%d}",
+		     g->tok->u.name, words[g->addr], g->elems);
+	}
+	/* handle main(argc, argv) */
 	if (params) {
 		if (!params->next || params->next->next)
 			eval_die(&mainproc->tok, "`main` only accepts 0 or 2 parameters (argc, argv)");
-		push_word(argc);
-		off = base + 1/*NULL*/ + 1/*argc*/ + argc + 1/*argv[argc]*/;
+		push_word(NULL, argc);
+		off = base + 1/*NULL*/ + globwords + 1/*argc*/ + argc + 1/*argv[argc]*/;
 		for (i = 0; i < argc; ++i) {
-			push_word(off);
+			push_word(NULL, off);
 			off += strlen(argv[i]) + 1;
 		}
-		push_word(0); /* argv[argc] == NULL */
+		push_word(NULL, 0); /* argv[argc] == NULL */
 		for (i = 0; i < argc; ++i) {
 			for (j = 0; argv[i][j]; ++j)
-				push_word(argv[i][j]);
-			push_word(0);
+				push_word(NULL, argv[i][j]);
+			push_word(NULL, 0);
 		}
-		locs = alloc(&parse_alloc, sizeof(*locs)); /* argv */
+		locs = alloc(&eval_alloc, sizeof(*locs)); /* argv */
 		locs->tok = &params->tok;
-		locs->addr = push_word(base + 2);
+		locs->addr = push_word(NULL, base + 2);
 		locs->elems = 0;
-		locs->next = alloc(&parse_alloc, sizeof(*locs)); /* argc */
+		locs->next = alloc(&eval_alloc, sizeof(*locs)); /* argc */
 		locs->next->tok = &params->next->tok;
-		locs->next->addr = push_word(base + 1);
+		locs->next->addr = base + 1 + globwords;
 		locs->next->elems = 0;
-	} /* END (argc, argv) handling */
-	if (debug && params) {
-		dlog(__LINE__, "words[%d..]:", base);
-		for (i = base; words[i] || words[i + 1]; ++i)
-			printf("%02x ", (unsigned char)words[i]);
-		printf("%02x\n", (unsigned char)words[i]);
 	}
-	v = eval_stmt(locs, mainproc->body);
-	DEREF(v);
-	dlog(__LINE__, "main() returned %"I64d, v.i);
+	if (debug && params) {
+		dlog(__LINE__, "words[%d..]: (each word truncated by 1 byte)", base);
+		for (i = base; words[i] || words[i + 1] || i < off; ++i) {
+			printf("%02x ", (unsigned int)(words[i] & 255));
+			if ((i + 1) % 16 == 0)
+				putchar('\n');
+		}
+		printf("%02x\n", (unsigned int)(words[i] & 255));
+	}
+	dlog(__LINE__, "calling main()");
+	clkbeg = clock();
+	v = eval_stmt(locs, mainproc->body); DEREF(v);
+	clkend = clock();
+	dlog(__LINE__, "main() returned %"PRId64" (0x%"PRIx64"); cputime = %"PRId64" ms",
+	     v.i, (uint64_t)v.i, (int64_t)((clkend - clkbeg) * 1000 / CLOCKS_PER_SEC));
+	/* final cleanup */
+	dealloc(&eval_alloc, eval_alloc.top - prev_eval_top);
+	memset(words, 0, words_top - base);
+	words_top = base;
 	return v.i & 255;
 }
 
@@ -1617,20 +1951,18 @@ int
 main(int argc, const char **argv)
 {
 	argv0 = argv[0];
-	if (argc < 2) {
-		usage();
-		return 2;
-	} else if (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help")) {
+	if (argc >= 2 && (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help"))) {
 		usage();
 		return 0;
-	} else if (!strcmp(argv[1], "-v")) {
+	} else if (argc >= 2 && !strcmp(argv[1], "-v")) {
 		puts(VERSION);
 		return 0;
-	} else if (!strcmp(argv[1], "-D") && argc >= 3) {
+	} else if (argc >= 2 && !strcmp(argv[1], "-D")) {
 		debug = 1;
 		dlog(__LINE__, "version: %s", VERSION);
 		--argc; ++argv;
-	} else {
+	}
+	if (argc < 2) {
 		usage();
 		return 2;
 	}
