@@ -9,13 +9,12 @@ proc main(argc, argv) {
     if (argc != 2) {
         return 1;
     }
-    PutInt(fibonacci(StrToInt(argv[1]), &memo));
+    PutInt(fibonacci(StrToInt(argv[1]), memo));
     PutChar(10); # newline
     # in absence of the return statement, "return 0;" is implied for all procedures
 }
 
-proc fibonacci(n, memo) { # everything is passed by value
-                          # (array variables are just pointers to ints)
+proc fibonacci(n, memo) { # arguments are passed by value (memo is a pointer)
     if n <= 1 {
         return n;
     }

@@ -1,8 +1,9 @@
-/* proc.c -- proc language tree-walk interpreter */
+/* proc.c -- proc language tree-walk interpreter
+ *
+ * XXX: keep in mind this is probably inefficient/broken, this is my first time trying this */
 
 #include <stddef.h>
 #include <limits.h>
-#include <inttypes.h>
 #include <assert.h>
 #include <stdarg.h>
 #include <string.h>
@@ -11,13 +12,15 @@
 
 #define VERSION "WIP -- https://github.com/danielsource/proc -- public domain"
 #define TOKEN_BUF_SIZE (64)
-#define PARSE_DATA_SIZE (50l*1000*1000)
-#define EVAL_DATA_SIZE (50l*1000*1000)
-#define WORDS_SIZE (500l*1000)
+#define PARSE_DATA_SIZE (50*1000*1000)
+#define EVAL_DATA_SIZE (50*1000*1000)
+#define WORDS_SIZE (500*1000)
 #define UNARY_PREC 10
 
+#define STATIC_ASSERT(x) int STATIC_ASSERT(int [(x)?1:-1])
 #define ROUND_UP(n, to) (((n) + ((to) - 1)) & ~((to) - 1))
 #define LENGTH(x) ((int)(sizeof(x) / sizeof((x)[0])))
+#define DEREF(v) (v.deref = v.deref ? (v.i = words[v.i], 0) : 0);
 
 /* assumes ASCII */
 #define IS_SPACE(c) (((c) >= 0 && (c) <= 32) || (c) == 127)
@@ -27,6 +30,14 @@
 #define IS_ALNUM(c) (IS_DIGIT(c) || IS_ALPHA(c))
 #define IS_IDENT1(c) (IS_ALPHA(c) || (c) == '_') /* A-Za-z_ */
 #define IS_IDENT2(c) (IS_ALNUM(c) || (c) == '_') /* A-Za-z_0-9 */
+
+#ifdef _WIN32
+	typedef long long i64;
+	#define I64d "lld"
+#else
+	typedef long i64;
+	#define I64d "ld"
+#endif
 
 struct bumpalloc {
 	char *beg, *top, *end;
@@ -89,7 +100,7 @@ struct token {
 	enum tok_tag tag;
 	int line, col, col_end;
 	union {
-		int64_t i;
+		i64 i;
 		const char *name;
 	} u;
 };
@@ -196,7 +207,21 @@ struct stmt {
 	} u;
 };
 
+struct var {
+	struct token *tok;
+	int addr;
+	int elems; /* 0 if scalar, otherwise array[elems] */
+	struct var *next;
+};
+
+struct val {
+	i64 i;
+	int deref, ret;
+};
+
 /* globals */
+
+int debug = 0;
 
 const char *argv0, *script_path;
 FILE *script_file;
@@ -207,8 +232,8 @@ struct bumpalloc parse_alloc;
 char eval_data[EVAL_DATA_SIZE];
 struct bumpalloc eval_alloc;
 
-int64_t words[WORDS_SIZE];
-struct bumpalloc word_alloc;
+i64 words[WORDS_SIZE];
+int words_top;
 
 struct token tok = {TOK_START};
 struct token tok_undo[2];
@@ -216,24 +241,48 @@ int tok_undo_top = 0;
 
 struct ast ast;
 
+struct var *globals;
+
+/* compile-time assertions */
+
+STATIC_ASSERT(sizeof(int) >= 4);
+STATIC_ASSERT(sizeof(i64) >= 8);
+STATIC_ASSERT((i64)-1 == ~0);
+
 /* implementation */
 
+void
+dlog(int ln, const char *msg, ...)
+{
+	va_list ap;
+	char s[TOKEN_BUF_SIZE * 4];
+
+	if (!debug)
+		return;
+	va_start(ap, msg);
+	vsprintf(s, msg, ap);
+	va_end(ap);
+	fprintf(stderr, __FILE__":%d: DEBUG: %s\n", ln, s);
+}
+
 struct bumpalloc
-bumpalloc_new(void *p, size_t capacity)
+bumpalloc_new(void *p, int capacity)
 {
 	struct bumpalloc a;
 
 	assert(p);
+	assert(capacity >= 1);
 	a.beg = a.top = p;
 	a.end = (char *)p + capacity;
 	return a;
 }
 
 void *
-alloc(struct bumpalloc *a, size_t n)
+alloc(struct bumpalloc *a, int n)
 {
 	char *new, *last;
 
+	assert(n >= 1);
 	new = a->top + ROUND_UP(n, sizeof(void *));
 	assert(new >= a->beg);
 	assert(new >= a->top);
@@ -244,10 +293,11 @@ alloc(struct bumpalloc *a, size_t n)
 }
 
 void
-dealloc(struct bumpalloc *a, size_t n)
+dealloc(struct bumpalloc *a, int n)
 {
 	char *new;
 
+	assert(n >= 1);
 	new = a->top - ROUND_UP(n, sizeof(void *));
 	assert(new >= a->beg);
 	assert(new <= a->top);
@@ -259,9 +309,8 @@ void
 parse_die(const char *msg, ...)
 {
 	va_list ap;
-	char *s;
+	char s[TOKEN_BUF_SIZE * 4];
 
-	s = alloc(&parse_alloc, TOKEN_BUF_SIZE * 4);
 	va_start(ap, msg);
 	vsprintf(s, msg, ap);
 	va_end(ap);
@@ -275,12 +324,11 @@ parse_die(const char *msg, ...)
 }
 
 void
-eval_die(const char *msg, struct token *t, ...)
+eval_die(struct token *t, const char *msg, ...)
 {
 	va_list ap;
-	char *s;
+	char s[TOKEN_BUF_SIZE * 4];
 
-	s = alloc(&eval_alloc, TOKEN_BUF_SIZE * 4);
 	va_start(ap, msg);
 	vsprintf(s, msg, ap);
 	va_end(ap);
@@ -293,10 +341,10 @@ eval_die(const char *msg, struct token *t, ...)
 	exit(3);
 }
 
-int64_t
+i64
 str_to_int(const char *digits)
 {
-	int64_t n = 0, sign = 1, base = 10, digitval;
+	i64 n = 0, sign = 1, base = 10, digitval;
 	const char *s;
 
 	s = digits;
@@ -342,7 +390,7 @@ str_to_int(const char *digits)
 	return n * sign;
 invalid_int_lit:
 	parse_die("invalid integer literal `%s`", digits);
-	assert(!"unexpected state");
+	return 0;
 }
 
 const char *
@@ -355,7 +403,7 @@ get_token_str(struct token t)
 	case TOK_INT:
 		if (t.line > 0 && t.col > 0) {
 			s = alloc(&parse_alloc, TOKEN_BUF_SIZE);
-			sprintf(s, "%"PRIi64, t.u.i);
+			sprintf(s, "%"I64d, t.u.i);
 			return s;
 		}
 		return "<integer>";
@@ -409,6 +457,7 @@ get_token_str(struct token t)
 	case TOK_START:
 	default:
 		assert(!"unexpected state");
+		return NULL;
 	}
 }
 
@@ -1073,8 +1122,8 @@ parse_proc(void)
 		param->tag = STMT_DECL;
 		param->tok = tok;
 		if (get_decl(proc->params, tok.u.name))
-			parse_die("procedure `%s` contains duplicated parameter `%s`",
-				 proc->tok.u.name, tok);
+			parse_die("procedure `%s` contains redeclaration of parameter `%s`",
+				  proc->tok.u.name, tok.u.name);
 		if (proc->params)
 			param->next = proc->params;
 		proc->params = param;
@@ -1106,6 +1155,7 @@ parse(void)
 		parse_die("cannot open script to read");
 	memset(&ast, 0, sizeof(ast));
 	decl = &ast.globals;
+	dlog(__LINE__, "parsing...");
 	while (!eof) {
 		next_token();
 		switch (tok.tag) {
@@ -1128,7 +1178,9 @@ parse(void)
 			parse_die("expected `int` or `proc`, but got `%s`", get_token_str(tok));
 		}
 	}
+	dlog(__LINE__, "parsing...done");
 	fclose(script_file);
+	script_file = NULL;
 }
 
 void
@@ -1146,32 +1198,40 @@ print_expr(struct expr *e, int depth)
 			fputs("(", stdout);
 		print_expr(e->left, depth + 1);
 		fputs("[", stdout);
-		print_expr(e->right, depth);
+		print_expr(e->right, 0);
 		fputs("]", stdout);
 		if (depth)
 			fputs(")", stdout);
 		break;
 	case EXPR_CALL:
-		fputs(get_token_str(e->left->tok), stdout);
+		if (depth)
+			fputs("(", stdout);
+		print_expr(e->left, depth + 1);
 		fputs("(", stdout);
 		if (e->right) {
 			for (arg = e->right; arg->right; arg = arg->right) {
-				print_expr(arg->left, depth);
+				print_expr(arg->left, 0);
 				fputs(", ", stdout);
 			}
-			print_expr(arg->left, depth);
+			print_expr(arg->left, 0);
 		}
 		fputs(")", stdout);
+		if (depth)
+			fputs(")", stdout);
 		break;
 	case EXPR_ADDROF:
 	case EXPR_POS:
 	case EXPR_NEG:
 	case EXPR_NOT:
 	case EXPR_BIT_NOT:
+		if (depth)
+			fputs("(", stdout);
 		fputs(get_token_str(e->tok), stdout);
 		fputs("(", stdout);
-		print_expr(e->left, depth);
+		print_expr(e->left, 0);
 		fputs(")", stdout);
+		if (depth)
+			fputs(")", stdout);
 		break;
 	case EXPR_REM:
 	case EXPR_DIV:
@@ -1366,12 +1426,179 @@ print_program(struct ast a)
 	}
 }
 
+int
+push_word(i64 x)
+{
+	int addr;
+
+	if (words_top + 1 > WORDS_SIZE)
+		eval_die(NULL, "word stack overflow");
+	addr = words_top++;
+	words[addr] = x;
+	return addr;
+}
+
+struct val
+eval_expr(struct var *locs, struct expr *e, int constexpr)
+{
+	struct val v = {0};
+	struct expr *arg;
+
+	switch (e->tag) {
+	case EXPR_INT:
+	case EXPR_NAME:
+		assert(!"not implemented"); /* XXX */
+		break;
+	case EXPR_ARRIDX:
+		assert(!"not implemented"); /* XXX */
+		eval_expr(locs, e->left, constexpr);
+		eval_expr(locs, e->right, constexpr);
+		break;
+	case EXPR_CALL:
+		assert(!"not implemented"); /* XXX */
+		if (constexpr)
+			eval_die(&e->tok, "expression is not constant");
+		eval_expr(locs, e->left, 0);
+		if (e->right) {
+			for (arg = e->right; arg; arg = arg->right) {
+				eval_expr(locs, arg->left, 0);
+			}
+		}
+		break;
+	case EXPR_ADDROF:
+	case EXPR_POS:
+	case EXPR_NEG:
+	case EXPR_NOT:
+	case EXPR_BIT_NOT:
+		assert(!"not implemented"); /* XXX */
+		eval_expr(locs, e->left, constexpr);
+		break;
+	case EXPR_REM:
+	case EXPR_DIV:
+	case EXPR_MUL:
+	case EXPR_SUB:
+	case EXPR_ADD:
+	case EXPR_BIT_SH_R:
+	case EXPR_BIT_SH_L:
+	case EXPR_GE:
+	case EXPR_GT:
+	case EXPR_LE:
+	case EXPR_LT:
+	case EXPR_NEQ:
+	case EXPR_EQ:
+	case EXPR_BIT_AND:
+	case EXPR_BIT_XOR:
+	case EXPR_BIT_OR:
+	case EXPR_AND:
+	case EXPR_OR:
+		assert(!"not implemented"); /* XXX */
+		eval_expr(locs, e->left, constexpr);
+		eval_expr(locs, e->right, constexpr);
+		break;
+	default:
+		assert(!"unexpected state");
+	}
+	return v;
+}
+
+struct val
+eval_stmt(struct var *locs, struct stmt *stmt)
+{
+	struct val v = {0};
+
+	while (1) {
+		switch (stmt->tag) {
+		case STMT_RETURN:
+			if (stmt->u.expr) {
+				v = eval_expr(locs, stmt->u.expr, 0);
+				DEREF(v);
+			}
+			v.ret = 1;
+			return v;
+		case STMT_DECL:
+			assert(!"not implemented"); /* XXX */
+			break;
+		case STMT_ASSIGN:
+		case STMT_ASSIGN_ADD:
+		case STMT_ASSIGN_SUB:
+		case STMT_ASSIGN_MUL:
+		case STMT_ASSIGN_DIV:
+		case STMT_ASSIGN_REM:
+		case STMT_ASSIGN_BIT_SH_L:
+		case STMT_ASSIGN_BIT_SH_R:
+		case STMT_ASSIGN_BIT_AND:
+		case STMT_ASSIGN_BIT_XOR:
+		case STMT_ASSIGN_BIT_OR:
+			assert(!"not implemented"); /* XXX */
+			break;
+		case STMT_CALL:
+			assert(!"not implemented"); /* XXX */
+			break;
+		case STMT_SELECT:
+			assert(!"not implemented"); /* XXX */
+			break;
+		case STMT_LOOP:
+			assert(!"not implemented"); /* XXX */
+			break;
+		default:
+			assert(!"unexpected state");
+		}
+	}
+	return v;
+}
+
 /* XXX */
 int
 eval(int argc, const char **argv)
 {
-	assert((int64_t)-1 == ~0);
-	return 0;
+	struct proc *mainproc;
+	struct stmt *params;
+	struct val v = {0};
+	struct var *locs = NULL;
+	int i, j, base, off;
+
+	dlog(__LINE__, "evaluating...");
+	mainproc = get_proc(ast.procs, "main");
+	if (!mainproc)
+		eval_die(NULL, "missing procedure `main`");
+	params = mainproc->params;
+	base = push_word(0);
+	/* XXX eval_globals */
+	/* (argc, argv) handling */
+	if (params) {
+		if (!params->next || params->next->next)
+			eval_die(&mainproc->tok, "`main` only accepts 0 or 2 parameters (argc, argv)");
+		push_word(argc);
+		off = base + 1/*NULL*/ + 1/*argc*/ + argc + 1/*argv[argc]*/;
+		for (i = 0; i < argc; ++i) {
+			push_word(off);
+			off += strlen(argv[i]) + 1;
+		}
+		push_word(0); /* argv[argc] == NULL */
+		for (i = 0; i < argc; ++i) {
+			for (j = 0; argv[i][j]; ++j)
+				push_word(argv[i][j]);
+			push_word(0);
+		}
+		locs = alloc(&parse_alloc, sizeof(*locs)); /* argv */
+		locs->tok = &params->tok;
+		locs->addr = push_word(base + 2);
+		locs->elems = 0;
+		locs->next = alloc(&parse_alloc, sizeof(*locs)); /* argc */
+		locs->next->tok = &params->next->tok;
+		locs->next->addr = push_word(base + 1);
+		locs->next->elems = 0;
+	} /* END (argc, argv) handling */
+	if (debug && params) {
+		dlog(__LINE__, "words[%d..]:", base);
+		for (i = base; words[i] || words[i + 1]; ++i)
+			printf("%02x ", (unsigned char)words[i]);
+		printf("%02x\n", (unsigned char)words[i]);
+	}
+	v = eval_stmt(locs, mainproc->body);
+	DEREF(v);
+	dlog(__LINE__, "main() returned %"I64d, v.i);
+	return v.i & 255;
 }
 
 void
@@ -1399,12 +1626,26 @@ main(int argc, const char **argv)
 	} else if (!strcmp(argv[1], "-v")) {
 		puts(VERSION);
 		return 0;
+	} else if (!strcmp(argv[1], "-D") && argc >= 3) {
+		debug = 1;
+		dlog(__LINE__, "version: %s", VERSION);
+		--argc; ++argv;
+	} else {
+		usage();
+		return 2;
 	}
 	script_path = argv[1];
+	dlog(__LINE__, "script: %s", script_path);
+	dlog(__LINE__, "maximum token size: %d", TOKEN_BUF_SIZE);
+	dlog(__LINE__, "initializing bump allocator for parsing with %d bytes", sizeof(parse_data));
 	parse_alloc = bumpalloc_new(parse_data, sizeof(parse_data));
+	dlog(__LINE__, "initializing bump allocator for evaluation with %d bytes", sizeof(eval_data));
 	eval_alloc = bumpalloc_new(eval_data, sizeof(eval_data));
-	word_alloc = bumpalloc_new(words, sizeof(words));
+	dlog(__LINE__, "word stack size: %d", WORDS_SIZE);
 	parse();
-	print_program(ast);
+	if (debug) {
+		dlog(__LINE__, "printing AST:");
+		print_program(ast);
+	}
 	return eval(--argc, ++argv);
 }
