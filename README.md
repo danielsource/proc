@@ -1,30 +1,60 @@
 # proc (work-in-progress)
 
-```
-#!/usr/bin/env proc
-
+```ini
+# This language is like a very dumb C (only int, if, else, while, proc...)
 proc main(argc, argv) {
-    # the only data type is signed 64-bit integer
-    int memo[92]; # zeroed out by default
-    if (argc != 2) {
-        return 1;
-    }
-    PutInt(fibonacci(StrToInt(argv[1]), memo));
-    PutChar(10); # newline
-    # in absence of the return statement, "return 0;" is implied here
+	int memcap = MAX_FIB + 1; # The only data type is signed 64-bit integer
+	int memfib[memcap];       # Variables are zeroed out by default
+
+	if argc != 2 {
+		return 1;
+	}
+
+	# There aren't strings, so argv[] is wasteful, taking up 8 bytes
+	# per character for each pointed "string".
+
+	# Print argv[1]-th Fibonacci sequence number
+	PutInt(fibonacci(StrToInt(argv[1]), memfib));
+
+	# Print memfib[]
+	int i = 2;
+	if memfib[i] { PutChar('\n'); }
+	while memfib[i] && i < memcap {
+		# Unspecified arguments in call are zero
+		PutInt(i, 1);  # Set 1 to not print newline
+		PutChar(' '); PutChar(':'); PutChar(' ');
+		PutInt(memfib[i]);
+		i += 1;
+	}
+	# In the absence of the return statement, "return 0;" is implied
 }
 
-proc fibonacci(n, memo) { # arguments are passed by value (memo is a pointer)
-    if n <= 1 {
-        return n;
-    }
-    if (memo[n]) {
-        return memo[n];
-    }
-    # operator precedence is similar to C's
-    memo[n] = fibonacci(n - 1, memo) + fibonacci(n - 2, memo);
-    return memo[n];
+int MAX_FIB = 92;
+
+proc fibonacci(n, mem) { # Arguments are passed by value (mem is a pointer)
+	Assert(n <= MAX_FIB);
+	if n < 2 {
+		return n;
+	}
+	if !mem[n] {
+		# Operator precedence is similar to C's
+		mem[n] = fibonacci(n - 1, mem) +
+		          fibonacci(n - 2, mem);
+	}
+	return mem[n];
 }
+
+# Builtins:
+#   StrToInt(digits)      -> int
+#   PutInt(i, no_newline)
+#   PutChar(c)
+#   GetChar()             -> int
+#   Rand(seed)            -> int
+#   Exit(code)
+#   Assert(expression)
+
+# There is no fancy features, no bound checking, no strings.
+# This is pretty much useless, just for fun!
 ```
 
 My attempt to make a [toy programming language](https://en.wikipedia.org/wiki/Esoteric_programming_language).

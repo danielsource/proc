@@ -1,0 +1,34 @@
+#!/usr/bin/env proc
+
+proc main(argc, argv) {
+	int memcap = MAX_FIB + 1;
+	int memfib[memcap];
+
+	if argc != 2 {
+		return 1;
+	}
+
+	PutInt(fibonacci(StrToInt(argv[1]), memfib));
+	int i = 2;
+	if memfib[i] { PutChar('\n'); }
+	while memfib[i] && i < memcap {
+		PutInt(i, 1);
+		PutChar(' '); PutChar(':'); PutChar(' ');
+		PutInt(memfib[i]);
+		i += 1;
+	}
+}
+
+int MAX_FIB = 92;
+
+proc fibonacci(n, mem) {
+	Assert(n <= MAX_FIB);
+	if n < 2 {
+		return n;
+	}
+	if !mem[n] {
+		mem[n] = fibonacci(n - 1, mem) +
+		          fibonacci(n - 2, mem);
+	}
+	return mem[n];
+}
