@@ -1,6 +1,6 @@
 # proc (work-in-progress)
 
-```ini
+```make
 # This language is like a very dumb C (only int, if, else, while, proc...)
 proc main(argc, argv) {
 	int memcap = MAX_FIB + 1; # The only data type is signed 64-bit integer
@@ -13,7 +13,7 @@ proc main(argc, argv) {
 	# There aren't strings, so argv[] is wasteful, taking up 8 bytes
 	# per character for each pointed "string".
 
-	# Print argv[1]-th Fibonacci sequence number
+	# Print a Fibonacci sequence number
 	PutInt(fibonacci(StrToInt(argv[1]), memfib));
 
 	# Print memfib[]
