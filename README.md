@@ -30,7 +30,7 @@ proc fibonacci(n, memo) { # arguments are passed by value (memo is a pointer)
 My attempt to make a [toy programming language](https://en.wikipedia.org/wiki/Esoteric_programming_language).
 Inspired by [_B_](https://web.archive.org/web/20240425202455/https://www.bell-labs.com/usr/dmr/www/kbman.html).
 
-`proc.c` contains (will contain) the interpreter (parser + evaluator) which is the language specification itself.
+`proc.c` contains the interpreter (parser + evaluator) which is the language specification itself.
 
 `examples` directory contains examples of programs in _proc_.
 

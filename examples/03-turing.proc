@@ -1,0 +1,101 @@
+#!/usr/bin/env proc
+
+# directions
+int DIR_LEFT = -1;
+int DIR_STAY = 0;
+int DIR_RIGHT = 1;
+
+# state fields (like a struct)
+int Q_IF_0_WRITE = 0; # write symbol
+int Q_IF_0_MOVE = 1;  # move to direction
+int Q_IF_0_NEXT = 2;  # set next state
+int Q_IF_1_WRITE = 3;
+int Q_IF_1_MOVE = 4;
+int Q_IF_1_NEXT = 5;
+int Q_IF_B_WRITE = 6;
+int Q_IF_B_MOVE = 7;
+int Q_IF_B_NEXT = 8;
+int Q_FINAL = 9;      # accepting state
+int Q_FIELDS = 10;    # field count
+
+# turing machine (input = {'0', '1'} and blank = '_')
+int tape_size = 16, tape[tape_size];
+int state_count = 1, states[state_count * Q_FIELDS];
+int state_cur = 0;
+int head = 1;
+
+proc randtape() {
+	int i;
+
+	tape[0] = '_';
+	i = 1;
+	while i < tape_size / 2 {
+		tape[i] = Rand() % 2 + '0';
+		i += 1;
+	}
+	while i < tape_size {
+		tape[i] = '_';
+		i += 1;
+	}
+}
+
+proc printtape() {
+	int i;
+
+	while i < tape_size {
+		Assert(tape[i] == '0' || tape[i] == '1' || tape[i] == '_');
+		PutChar(tape[i]);
+		i += 1;
+	}
+	PutChar('\n');
+}
+
+proc curstate(field) {
+	return states[state_cur * Q_FIELDS + field];
+}
+
+proc initstates() {
+	states[0 * Q_FIELDS + Q_IF_0_WRITE]  = '1';
+	states[0 * Q_FIELDS + Q_IF_0_MOVE]   = DIR_RIGHT;
+	states[0 * Q_FIELDS + Q_IF_0_NEXT]   = 0;
+	states[0 * Q_FIELDS + Q_IF_1_WRITE]  = '0';
+	states[0 * Q_FIELDS + Q_IF_1_MOVE]   = DIR_RIGHT;
+	states[0 * Q_FIELDS + Q_IF_1_NEXT]   = 0;
+}
+
+proc execmach() {
+	int write;
+
+	while head >= 0 && head < tape_size {
+		if tape[head] == '0' {
+			write = curstate(Q_IF_0_WRITE);
+			if !write { return; }  # stop if there is no transition
+			tape[head] = write;
+			head += curstate(Q_IF_0_MOVE);
+			state_cur = curstate(Q_IF_0_NEXT);
+		} else if tape[head] == '1' {
+			write = curstate(Q_IF_1_WRITE);
+			if !write { return; }  # stop if there is no transition
+			tape[head] = write;
+			head += curstate(Q_IF_1_MOVE);
+			state_cur = curstate(Q_IF_1_NEXT);
+		} else if tape[head] == '_' {
+			write = curstate(Q_IF_B_WRITE);
+			if !write { return; }  # stop if there is no transition
+			tape[head] = write;
+			head += curstate(Q_IF_B_MOVE);
+			state_cur = curstate(Q_IF_B_NEXT);
+		} else {
+			Assert(0);
+		}
+	}
+}
+
+proc main(argc, argv) {
+	randtape();
+	printtape();
+	initstates();
+	execmach();
+	printtape();
+	return !curstate(Q_FINAL);
+}

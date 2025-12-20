@@ -2,17 +2,22 @@
 
 proc fizzbuzz(x) {
 	if x % 15 == 0 {
-		PutChar('F');
-		PutChar('B');
+		printfizz();
+		printbuzz();
+		PutChar('\n');
 	} else if x % 3 == 0 {
-		PutChar('F');
+		printfizz();
+		PutChar('\n');
 	} else if x % 5 == 0 {
-		PutChar('B');
+		printbuzz();
+		PutChar('\n');
 	} else {
 		PutInt(x);
 	}
-	PutChar('\n');
 }
+
+proc printfizz() { PutChar('F');PutChar('i');PutChar('z');PutChar('z'); }
+proc printbuzz() { PutChar('B');PutChar('u');PutChar('z');PutChar('z'); }
 
 proc main() {
 	int i = 1;

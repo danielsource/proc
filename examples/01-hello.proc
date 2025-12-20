@@ -9,8 +9,8 @@ proc main() {
 	s[3] = 'l';
 	s[4] = 'o';
 	while i < n {
-		PrintChar(s[i]);
+		PutChar(s[i]);
 		i += 1;
 	}
-	PrintChar('\n');
+	PutChar('\n');
 }

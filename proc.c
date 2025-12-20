@@ -234,7 +234,7 @@ int compiletime_assert2(int [(int64_t)-1 == ~0  ?1:-1]);
 /* implementation */
 
 void
-dlog(int ln, const char *msg, ...)
+debuglog(int ln, const char *msg, ...)
 {
 	va_list ap;
 	char s[TOKEN_BUF_SIZE * 4];
@@ -289,6 +289,8 @@ parse_die(const char *msg, ...)
 		fprintf(stderr, "%s: ERROR: %s\n", script_path, s);
 	if (script_file)
 		fclose(script_file);
+	if (debug)
+		abort();
 	exit(2);
 }
 
@@ -307,6 +309,8 @@ eval_die(struct token *t, const char *msg, ...)
 		fprintf(stderr, "%s: ERROR: %s\n", script_path, s);
 	if (script_file)
 		fclose(script_file);
+	if (debug)
+		abort();
 	exit(3);
 }
 
@@ -1175,7 +1179,7 @@ parse(void)
 		parse_die("cannot open script to read");
 	memset(&ast, 0, sizeof(ast));
 	decl = &ast.globals;
-	dlog(__LINE__, "parsing...");
+	debuglog(__LINE__, "parsing...");
 	while (!eof) {
 		next_token();
 		switch (tok.tag) {
@@ -1198,7 +1202,7 @@ parse(void)
 			parse_die("expected `int` or `proc`, but got `%s`", get_token_str(tok));
 		}
 	}
-	dlog(__LINE__, "parsing...done");
+	debuglog(__LINE__, "parsing...done");
 	fclose(script_file);
 	script_file = NULL;
 }
@@ -1614,7 +1618,7 @@ builtin_random(struct var *locs, struct expr *procexpr, struct expr *args) /* ar
 		seed = defstate;
 	}
 	v.i = seed * 48271 % 2147483647;
-	defstate = v.i;
+	defstate = v.i * 48271 % 2147483647;
 	return v;
 }
 
@@ -1644,7 +1648,7 @@ builtin_assert(struct var *locs, struct expr *procexpr, struct expr *args) /* ar
 	par = alloc(&eval_alloc, sizeof(*par));
 	par->tag = STMT_DECL;
 	par->tok.tag = TOK_NAME;
-	par->tok.u.name = "_bi_code";
+	par->tok.u.name = "_bi_expr";
 	var = eval_args(locs, par, procexpr, args);
 	if (words[var->addr])
 		return v;
@@ -1709,7 +1713,7 @@ eval_call(struct var *locs, struct expr *e)
 
 	assert(e->tag == EXPR_CALL);
 	assert(e->left->tag == EXPR_NAME);
-	assert(e->right->tag == EXPR_ARGS);
+	assert(!e->right || e->right->tag == EXPR_ARGS);
 	procexpr = e->left;
 	procname = procexpr->tok.u.name;
 	proc = get_proc(ast.procs, procname);
@@ -1913,7 +1917,7 @@ eval_expr(struct var *locs, struct expr *e, int constexpr)
 		v = eval_expr(locs, e->left, constexpr); DEREF(v);
 		if (!v.i) { /* short-circuit */
 			w = eval_expr(locs, e->right, constexpr); DEREF(w);
-			v.i = v.i && w.i;
+			v.i = v.i || w.i;
 		}
 		break;
 	default:
@@ -1928,35 +1932,74 @@ div_by_zero:
 struct val
 eval_stmt(struct var *locs, struct stmt *stmt)
 {
-	struct val v = {0};
+	struct val v = {0}, w = {0};
+	struct var *var;
 
 	while (stmt) {
 		switch (stmt->tag) {
 		case STMT_RETURN:
 			if (stmt->u.expr) {
 				v = eval_expr(locs, stmt->u.expr, 0); DEREF(v);
+			} else {
+				memset(&v, 0, sizeof(v));
 			}
 			v.ret = 1; /* flag to return early */
 			return v;
 		case STMT_DECL:
-			assert(!"not implemented"); /* XXX */
+			var = alloc(&eval_alloc, sizeof(*var));
+			var->tok = &stmt->tok;
+			if (stmt->u.decl.elems) {
+				v = eval_expr(locs, stmt->u.decl.elems, 0); DEREF(v);
+				var->addr = push_word(var->tok, push_arr(var->tok, v.i));
+				var->elems = v.i;
+			} else if (stmt->u.decl.expr) {
+				v = eval_expr(locs, stmt->u.decl.expr, 0); DEREF(v);
+				var->addr = push_word(var->tok, v.i);
+			} else {
+				var->addr = push_word(var->tok, 0);
+			}
+			if (locs)
+				var->next = locs;
+			locs = var;
 			break;
 		case STMT_ASSIGN:
-			assert(!"not implemented"); /* XXX */
+			v = eval_expr(locs, stmt->u.ass.lhs, 0);
+			w = eval_expr(locs, stmt->u.ass.rhs, 0); DEREF(w);
+			if (!v.deref)
+				eval_die(&stmt->tok, "cannot assign to non-variable");
+			if (!v.i)
+				eval_die(&stmt->tok, "cannot assign to null");
+			words[v.i] = w.i;
 			break;
 		case STMT_CALL:
-			assert(!"not implemented"); /* XXX */
+			v = eval_expr(locs, stmt->u.expr, 0); DEREF(v);
 			break;
 		case STMT_SELECT:
-			assert(!"not implemented"); /* XXX */
+			v = eval_expr(locs, stmt->u.sel.cond, 0); DEREF(v);
+			if (v.i) {
+				v = eval_stmt(locs, stmt->u.sel.ifbody); DEREF(v);
+			} else {
+				v = eval_stmt(locs, stmt->u.sel.elsebody); DEREF(v);
+			}
+			if (v.ret)
+				return v;
 			break;
 		case STMT_LOOP:
-			assert(!"not implemented"); /* XXX */
+			while (1) {
+				v = eval_expr(locs, stmt->u.loop.cond, 0); DEREF(v);
+				if (!v.i)
+					break;
+				v = eval_stmt(locs, stmt->u.loop.body); DEREF(v);
+				if (v.ret)
+					return v;
+			}
 			break;
 		default:
 			assert(!"unexpected state");
 		}
+		stmt = stmt->next;
 	}
+	memset(&v, 0, sizeof(v));
 	return v;
 }
 
@@ -1973,7 +2016,7 @@ eval(int argc, const char **argv)
 	char *prev_eval_top;
 	clock_t clkbeg, clkend;
 
-	dlog(__LINE__, "evaluating...");
+	debuglog(__LINE__, "evaluating...");
 	mainproc = get_proc(ast.procs, "main");
 	if (!mainproc)
 		eval_die(NULL, "missing procedure `main`");
@@ -1985,7 +2028,7 @@ eval(int argc, const char **argv)
 		gvar->tok = &gdecl->tok;
 		if (gdecl->u.decl.elems) {
 			v = eval_expr(NULL, gdecl->u.decl.elems, 1); DEREF(v);
-			gvar->addr = push_arr(gvar->tok, v.i);
+			gvar->addr = push_word(gvar->tok, push_arr(gvar->tok, v.i));
 			gvar->elems = v.i;
 		} else if (gdecl->u.decl.expr) {
 			v = eval_expr(NULL, gdecl->u.decl.expr, 1); DEREF(v);
@@ -2025,7 +2068,7 @@ eval(int argc, const char **argv)
 		locs->next->addr = argc_off;
 	}
 	if (debug && mainproc->params) {
-		dlog(__LINE__, "words[%d..]: (each word truncated by 1 byte)", prev_words_top);
+		debuglog(__LINE__, "words[%d..]: (each word truncated by 1 byte)", prev_words_top);
 		for (i = prev_words_top; words[i] || words[i + 1] || i < off; ++i) {
 			printf("%02x ", (unsigned int)(words[i] & 255));
 			if ((i + 1) % 16 == 0)
@@ -2034,14 +2077,14 @@ eval(int argc, const char **argv)
 				putchar(' ');
 		}
 		printf("%02x\n", (unsigned int)(words[i] & 255));
-		dlog(__LINE__, "calling main()");
+		debuglog(__LINE__, "calling main()");
 		clkbeg = clock();
 	}
 	/* call main */
 	v = eval_stmt(locs, mainproc->body); DEREF(v);
 	if (debug) {
 		clkend = clock();
-		dlog(__LINE__, "main() returned %"PRId64" (0x%"PRIx64"); cputime = %"PRIu64" ms",
+		debuglog(__LINE__, "main() returned %"PRId64" (0x%"PRIx64"); cputime = %"PRIu64" ms",
 		     v.i, (uint64_t)v.i, (uint64_t)(clkend - clkbeg) * 1000 / CLOCKS_PER_SEC);
 	}
 	/* final cleanup */
@@ -2077,7 +2120,7 @@ main(int argc, const char **argv)
 		return 0;
 	} else if (argc >= 2 && !strcmp(argv[1], "-D")) {
 		debug = 1;
-		dlog(__LINE__, "version: %s", VERSION);
+		debuglog(__LINE__, "version: %s", VERSION);
 		--argc; ++argv;
 	}
 	if (argc < 2) {
@@ -2089,7 +2132,7 @@ main(int argc, const char **argv)
 	eval_alloc = bumpalloc_new(eval_data, sizeof(eval_data));
 	parse();
 	if (debug) {
-		dlog(__LINE__, "printing AST:");
+		debuglog(__LINE__, "printing AST:");
 		print_program(ast);
 	}
 	return eval(--argc, ++argv);
