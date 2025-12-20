@@ -1128,7 +1128,7 @@ struct proc *
 parse_proc(void)
 {
 	struct proc *proc;
-	struct stmt *par;
+	struct stmt **par;
 
 	proc = alloc(&parse_alloc, sizeof(*proc));
 	next_token();
@@ -1138,24 +1138,23 @@ parse_proc(void)
 	next_token();
 	if (tok.tag != TOK_PAREN_L)
 		parse_die("expected `(`, but got `%s`", get_token_str(tok));
+	par = &proc->params;
 	next_token();
 	while (tok.tag != TOK_PAREN_R) {
 		if (tok.tag != TOK_NAME)
 			parse_die("expected `)` or a name, but got `%s`", get_token_str(tok));
-		par = alloc(&parse_alloc, sizeof(*par));
-		par->tag = STMT_DECL;
-		par->tok = tok;
 		if (get_decl(proc->params, tok.u.name))
 			parse_die("parameter redeclaration: `%s` in procedure `%s`",
-				  proc->tok.u.name, tok.u.name);
-		if (proc->params)
-			par->next = proc->params;
-		proc->params = par;
+				  tok.u.name, proc->tok.u.name);
+		*par = alloc(&parse_alloc, sizeof(struct stmt));
+		(*par)->tag = STMT_DECL;
+		(*par)->tok = tok;
 		next_token();
 		if (tok.tag == TOK_COMMA)
 			next_token();
 		else if (tok.tag != TOK_PAREN_R)
 			parse_die("expected `)` or `,`, but got `%s`", get_token_str(tok));
+		par = &(*par)->next;
 	}
 	next_token();
 	if (tok.tag != TOK_BRACE_L)
@@ -1431,7 +1430,7 @@ print_program(struct ast a)
 	if (a.globals)
 		fputs("\n", stdout);
 	if (a.procs)
-		fputs("# procedures (procedures/parameters are printed reversed)\n", stdout);
+		fputs("# procedures (printed reversed)\n", stdout);
 	for (proc = a.procs; proc; proc = proc->next) {
 		printf("proc %s(", proc->tok.u.name);
 		if (proc->params) {
@@ -1542,19 +1541,23 @@ builtin_str_to_int(struct var *locs, struct expr *procexpr, struct expr *args) /
 }
 
 struct val
-builtin_put_int(struct var *locs, struct expr *procexpr, struct expr *args) /* arity: 1 */
+builtin_put_int(struct var *locs, struct expr *procexpr, struct expr *args) /* arity: 2 */
 {
 	struct val v = {0};
 	struct var *var = NULL;
 	struct stmt *par;
 	int ret;
 
-	par = alloc(&eval_alloc, sizeof(*par));
+	par = alloc(&eval_alloc, sizeof(*par)); /* no newline? */
 	par->tag = STMT_DECL;
 	par->tok.tag = TOK_NAME;
-	par->tok.u.name = "_bi_int";
+	par->tok.u.name = "_bi_nl";
+	par->next = alloc(&eval_alloc, sizeof(*par)); /* int */
+	par->next->tag = STMT_DECL;
+	par->next->tok.tag = TOK_NAME;
+	par->next->tok.u.name = "_bi_int";
 	var = eval_args(locs, par, procexpr, args);
-	ret = printf("%"PRId64"\n", words[var->addr]);
+	ret = printf("%"PRId64"%s", words[var->next->addr], words[var->addr] ? "" : "\n");
 	v.i = ret >= 1 ? ret : -1;
 	if (fflush(stdout) == EOF)
 		v.i = -1;
@@ -1574,7 +1577,7 @@ builtin_put_char(struct var *locs, struct expr *procexpr, struct expr *args) /* 
 	par->tok.tag = TOK_NAME;
 	par->tok.u.name = "_bi_char";
 	var = eval_args(locs, par, procexpr, args);
-	c = fputc(words[var->addr], stdout);
+	c = fputc((unsigned char)words[var->addr], stdout);
 	v.i = c != EOF ? c : -1;
 	if (c == '\n' && fflush(stdout) == EOF)
 		v.i = -1;
@@ -2059,13 +2062,13 @@ eval(int argc, const char **argv)
 				push_word(NULL, argv[i][j]);
 			push_word(NULL, 0);
 		}
-		locs = alloc(&eval_alloc, sizeof(*locs)); /* argv */
+		locs = alloc(&eval_alloc, sizeof(*locs)); /* argc */
 		locs->tok = &mainproc->params->tok;
-		locs->addr = argc_off + 1;
-		words[locs->addr] = argc_off + 2;
-		locs->next = alloc(&eval_alloc, sizeof(*locs)); /* argc */
+		locs->addr = argc_off;
+		locs->next = alloc(&eval_alloc, sizeof(*locs)); /* argv */
 		locs->next->tok = &mainproc->params->next->tok;
-		locs->next->addr = argc_off;
+		locs->next->addr = argc_off + 1;
+		words[locs->next->addr] = argc_off + 2;
 	}
 	if (debug && mainproc->params) {
 		debuglog(__LINE__, "words[%d..]: (each word truncated by 1 byte)", prev_words_top);
@@ -2085,7 +2088,7 @@ eval(int argc, const char **argv)
 	if (debug) {
 		clkend = clock();
 		debuglog(__LINE__, "main() returned %"PRId64" (0x%"PRIx64"); cputime = %"PRIu64" ms",
-		     v.i, (uint64_t)v.i, (uint64_t)(clkend - clkbeg) * 1000 / CLOCKS_PER_SEC);
+			 v.i, (uint64_t)v.i, (uint64_t)(clkend - clkbeg) * 1000 / CLOCKS_PER_SEC);
 	}
 	/* final cleanup */
 	memset(prev_eval_top, 0, (size_t)(eval_alloc.top - prev_eval_top));
