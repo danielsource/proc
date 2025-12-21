@@ -49,6 +49,7 @@ proc fibonacci(n, mem) { # Arguments are passed by value (mem is a pointer)
 # Builtins:
 #   x = StrToInt(digits)        (exits on error)
 #   err = PutInt(i, no_newline) (-1 on error)
+#   err = PutHex(i, no_newline) (-1 on error)
 #   err = PutChar(c)            (-1 on error)
 #   c = GetChar()               (-1 on error)
 #   x = Rand(seed)
