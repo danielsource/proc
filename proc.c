@@ -12,7 +12,7 @@
 #include <stdio.h>
 #include <time.h>
 
-#define VERSION "2025-12-20 -- https://github.com/danielsource/proc"
+#define VERSION "2025-12-21 -- https://github.com/danielsource/proc"
 #define TOKEN_BUF_SIZE (80) /* 78 meaningful characters at most */
 #define PARSE_DATA_SIZE (50*1000*1000)
 #define EVAL_DATA_SIZE (50*1000*1000)
@@ -21,7 +21,7 @@
 
 #define ROUND_UP(n, to) (((n) + ((to) - 1)) & ~((to) - 1))
 #define LENGTH(x) ((int)(sizeof(x) / sizeof((x)[0])))
-#define DEREF(v) (v.deref = v.deref ? (v.i = words[v.i], 0) : 0)
+#define DEREF(v) (v.deref = v.deref ? (v.i = words[v.i], 0) : 0) /* lvalue-to-rvalue */
 
 /* assumes ASCII */
 #define IS_SPACE(c) (((c) >= 0 && (c) <= 32) || (c) == 127)
@@ -206,6 +206,7 @@ struct val {
 
 /* globals */
 
+int evalcmd = 0;
 int debug = 0;
 
 const char *argv0, *script_path;
@@ -323,7 +324,7 @@ str_to_int(const char *digits) /* XXX: can't parse INT64_MIN */
 
 	s = digits;
 	if (!*s) {
-		goto invalid_int_lit;
+		goto invalid_int;
 	} else if (*s == '+') {
 		++s;
 	} else if (*s == '-') {
@@ -338,11 +339,11 @@ str_to_int(const char *digits) /* XXX: can't parse INT64_MIN */
 		case 0:
 			return 0;
 		default:
-			goto invalid_int_lit;
+			goto invalid_int;
 		}
 		s += 2;
 		if (!*s)
-			goto invalid_int_lit;
+			goto invalid_int;
 	}
 	while (*s) {
 		if (IS_DIGIT(*s))
@@ -352,20 +353,20 @@ str_to_int(const char *digits) /* XXX: can't parse INT64_MIN */
 		else if (base == 16 && *s >= 'a' && *s <= 'f') /* a-f */
 			digitval = *s - 'a' + 10;
 		else
-			goto invalid_int_lit;
+			goto invalid_int;
 		if (digitval >= base)
-			goto invalid_int_lit;
+			goto invalid_int;
 		if (n > INT64_MAX / base) /* XXX: check this */
-			parse_die("integer literal is too large: `%s` [A]", digits);
+			parse_die("integer is too large: `%s` [A]", digits);
 		n *= base;
 		if (n > INT64_MAX - digitval)
-			parse_die("integer literal is too large: `%s` [B]", digits);
+			parse_die("integer is too large: `%s` [B]", digits);
 		n += digitval;
 		++s;
 	}
 	return n * sign;
-invalid_int_lit:
-	parse_die("invalid integer literal: `%s`", digits);
+invalid_int:
+	parse_die("invalid integer: `%s`", digits);
 	return 0;
 }
 
@@ -449,9 +450,10 @@ next_token(void)
 		parse_die("reading script failed");
 	if (tok.tag == TOK_NULL)
 		return;
-	if (tok_undo_top && tok_undo[tok_undo_top - 1].tag != TOK_NULL) {
+	if (tok_undo_top) {
+		assert(tok_undo[tok_undo_top - 1].tag != TOK_NULL);
 		tok = tok_undo[tok_undo_top - 1];
-		memset(&tok_undo[tok_undo_top - 1], 0, sizeof(*tok_undo));
+		memset(&tok_undo[tok_undo_top - 1], 0, sizeof(struct token));
 		--tok_undo_top;
 		return;
 	}
@@ -533,6 +535,7 @@ invalid_int_lit:
 	}
 	switch (c) {
 	case '\'': /* 'c' character literal */
+		i = -1;
 		c = fgetc(script_file);
 		if (c == '\\') { /* \<escape> */
 			c = fgetc(script_file);
@@ -558,6 +561,7 @@ invalid_int_lit:
 		if (c != '\'')
 invalid_char_lit:
 			parse_die("invalid character literal");
+		assert(i != -1);
 		tok.tag = TOK_INT;
 		tok.u.i = i;
 		col += 2;
@@ -696,9 +700,7 @@ invalid_char_lit:
 		}
 		goto end;
 	default:
-		if (c == EOF)
-			parse_die("unexpected end-of-file");
-		else if (c > 127)
+		if (c < 0 || c > 127)
 			parse_die("script contains non-ASCII character: %d;\n"
 				  "... this can happen when copying text from websites, PDFs, etc.",
 				  c);
@@ -717,6 +719,8 @@ end_consuming:
 void
 undo_token(void)
 {
+	if (tok.tag == TOK_NULL)
+		return;
 	assert(tok_undo_top < LENGTH(tok_undo));
 	assert(tok_undo[tok_undo_top].tag == TOK_NULL);
 	++tok_undo_top;
@@ -738,7 +742,7 @@ parse_unary_expr(void)
 			parse_die("expected `)`, but got `%s`", get_token_str(tok));
 		return e;
 	}
-	e = alloc(&parse_alloc, sizeof(*e));
+	e = alloc(&parse_alloc, sizeof(struct expr));
 	e->tok = tok;
 	switch (tok.tag) {
 	case TOK_INT:
@@ -817,7 +821,7 @@ parse_binary_expr(struct expr *left, int minprec)
 		next_token();
 		while (tok.tag != TOK_PAREN_R) {
 			undo_token();
-			*arg = alloc(&parse_alloc, sizeof(*e));
+			*arg = alloc(&parse_alloc, sizeof(struct expr));
 			(*arg)->tag = EXPR_ARGS;
 			(*arg)->tok = tok;
 			(*arg)->left = parse_expr(0);
@@ -833,7 +837,7 @@ parse_binary_expr(struct expr *left, int minprec)
 	} else {
 		right = parse_expr(prec);
 	}
-	e = alloc(&parse_alloc, sizeof(*e));
+	e = alloc(&parse_alloc, sizeof(struct expr));
 	e->tag = tag;
 	e->tok = op;
 	e->left = left;
@@ -851,10 +855,9 @@ parse_expr(int minprec)
 	while (1) {
 		e = parse_binary_expr(left, minprec);
 		if (e == left)
-			break;
+			return e;
 		left = e;
 	}
-	return e;
 }
 
 struct stmt *
@@ -1121,13 +1124,43 @@ get_proc(struct proc *procs, const char *name)
 	return NULL;
 }
 
+void
+dummy_main_for_evalcmd(struct token first, struct expr *e)
+{
+	debuglog(__LINE__, "generate \"proc main(argc,argv){PutInt(...);}\"");
+	ast.procs = alloc(&parse_alloc, sizeof(struct proc));
+	ast.procs->tok.tag = TOK_NAME;
+	ast.procs->tok.u.name = "main";
+	ast.procs->params = alloc(&parse_alloc, sizeof(struct stmt));
+	ast.procs->params->tag = STMT_DECL;
+	ast.procs->params->tok.tag = TOK_NAME;
+	ast.procs->params->tok.u.name = "argc";
+	ast.procs->params->next = alloc(&parse_alloc, sizeof(struct stmt));
+	ast.procs->params->next->tag = STMT_DECL;
+	ast.procs->params->next->tok.tag = TOK_NAME;
+	ast.procs->params->next->tok.u.name = "argv";
+	ast.procs->body = alloc(&parse_alloc, sizeof(struct stmt));
+	ast.procs->body->tag = STMT_CALL;
+	ast.procs->body->u.expr = alloc(&parse_alloc, sizeof(struct expr));
+	ast.procs->body->u.expr->tag = EXPR_CALL;
+	ast.procs->body->u.expr->tok.tag = TOK_PAREN_L;
+	ast.procs->body->u.expr->left = alloc(&parse_alloc, sizeof(struct expr));
+	ast.procs->body->u.expr->left->tag = EXPR_NAME;
+	ast.procs->body->u.expr->left->tok.tag = TOK_NAME;
+	ast.procs->body->u.expr->left->tok.u.name = "PutInt";
+	ast.procs->body->u.expr->right = alloc(&parse_alloc, sizeof(struct expr));
+	ast.procs->body->u.expr->right->tag = EXPR_ARGS;
+	ast.procs->body->u.expr->right->tok = first;
+	ast.procs->body->u.expr->right->left = e;
+}
+
 struct proc *
 parse_proc(void)
 {
 	struct proc *proc;
 	struct stmt **par;
 
-	proc = alloc(&parse_alloc, sizeof(*proc));
+	proc = alloc(&parse_alloc, sizeof(struct proc));
 	next_token();
 	if (tok.tag != TOK_NAME)
 		parse_die("expected a name, but got `%s`", get_token_str(tok));
@@ -1168,15 +1201,13 @@ parse(void)
 {
 	struct stmt **decl;
 	struct proc *proc;
-	int eof = 0;
+	struct expr *cmdexpr;
+	struct token cmdargtok;
 
-	script_file = fopen(script_path, "r");
-	if (!script_file)
-		parse_die("cannot open script to read");
 	memset(&ast, 0, sizeof(ast));
 	decl = &ast.globals;
 	debuglog(__LINE__, "parsing...");
-	while (!eof) {
+	while (1) {
 		next_token();
 		switch (tok.tag) {
 		case TOK_INT_KW:
@@ -1192,15 +1223,24 @@ parse(void)
 			ast.procs = proc;
 			break;
 		case TOK_NULL:
-			eof = 1;
-			break;
+			return;
 		default:
+			if (evalcmd) { /* try to read an expression instead of a program */
+				cmdargtok = tok;
+				undo_token();
+				debuglog(__LINE__, "trying to parse expression...");
+				cmdexpr = parse_expr(0);
+				debuglog(__LINE__, "trying to parse expression...done");
+				next_token();
+				if (tok.tag != TOK_NULL)
+					parse_die("unexpected symbol after expression: `%s`", get_token_str(tok));
+				dummy_main_for_evalcmd(cmdargtok, cmdexpr);
+				return;
+			}
 			parse_die("expected `int` or `proc`, but got `%s`", get_token_str(tok));
 		}
 	}
 	debuglog(__LINE__, "parsing...done");
-	fclose(script_file);
-	script_file = NULL;
 }
 
 void
@@ -1465,9 +1505,11 @@ push_word(struct token *t, int64_t x)
 {
 	int addr;
 
-	if (words_top + 1 > WORDS_SIZE)
+	if (words_top >= WORDS_SIZE)
 		eval_die(t, "word stack overflow");
 	addr = words_top++;
+	assert(addr >= 0);
+	assert(addr < WORDS_SIZE);
 	words[addr] = x;
 	return addr;
 }
@@ -1479,9 +1521,11 @@ push_arr(struct token *t, int n)
 
 	if (n < 1)
 		eval_die(t, "array size < 1 (%d)", n);
-	if (words_top + n > WORDS_SIZE)
+	if (words_top + n >= WORDS_SIZE)
 		eval_die(t, "word stack overflow: array is too large (%d)", n);
 	addr = words_top;
+	assert(addr >= 0);
+	assert(addr < WORDS_SIZE);
 	words_top += n;
 	return addr;
 }
@@ -1514,13 +1558,13 @@ builtin_str_to_int(struct var *locs, struct expr *procexpr, struct expr *args)
 	int64_t addr;
 	char buf[TOKEN_BUF_SIZE];
 
-	par = alloc(&eval_alloc, sizeof(*par));
+	par = alloc(&eval_alloc, sizeof(struct stmt));
 	par->tag = STMT_DECL;
 	par->tok.tag = TOK_NAME;
 	par->tok.u.name = "_bi_digits";
 	var = eval_args(locs, par, procexpr, args);
 	addr = words[var->addr];
-	if (addr <= 0 || addr + TOKEN_BUF_SIZE > WORDS_SIZE)
+	if (addr <= 0 || addr + LENGTH(buf) > WORDS_SIZE)
 		eval_die(&procexpr->tok, "%s: expected a \"string\" argument, like argv[i]",
 			 procexpr->tok.u.name);
 	c = (unsigned char)words[addr];
@@ -1530,8 +1574,8 @@ builtin_str_to_int(struct var *locs, struct expr *procexpr, struct expr *args)
 	}
 	buf[i] = 0;
 	if (i == LENGTH(buf) - 1)
-		eval_die(&procexpr->tok, "%s: \"string\" argument is too large",
-			 procexpr->tok.u.name);
+		eval_die(&procexpr->tok, "%s: \"string\" argument is too large: `%s...`",
+			 procexpr->tok.u.name, buf);
 	tok = procexpr->tok;
 	v.i = str_to_int(buf);
 	return v;
@@ -1545,15 +1589,19 @@ builtin_put_int(struct var *locs, struct expr *procexpr, struct expr *args)
 	struct stmt *par;
 	int ret;
 
-	par = alloc(&eval_alloc, sizeof(*par)); /* no newline? */
+	par = alloc(&eval_alloc, sizeof(struct stmt)); /* no newline? */
 	par->tag = STMT_DECL;
 	par->tok.tag = TOK_NAME;
 	par->tok.u.name = "_bi_no_newline";
-	par->next = alloc(&eval_alloc, sizeof(*par)); /* int */
+	par->next = alloc(&eval_alloc, sizeof(struct stmt)); /* int */
 	par->next->tag = STMT_DECL;
 	par->next->tok.tag = TOK_NAME;
 	par->next->tok.u.name = "_bi_int";
 	var = eval_args(locs, par, procexpr, args);
+	assert(var->next->addr >= 1);
+	assert(var->next->addr < WORDS_SIZE);
+	assert(var->addr >= 1);
+	assert(var->addr < WORDS_SIZE);
 	ret = printf("%"PRId64"%s", words[var->next->addr], words[var->addr] ? "" : "\n");
 	v.i = ret >= 1 ? ret : -1;
 	if (fflush(stdout) == EOF)
@@ -1569,7 +1617,7 @@ builtin_put_char(struct var *locs, struct expr *procexpr, struct expr *args)
 	struct stmt *par;
 	int c;
 
-	par = alloc(&eval_alloc, sizeof(*par));
+	par = alloc(&eval_alloc, sizeof(struct stmt));
 	par->tag = STMT_DECL;
 	par->tok.tag = TOK_NAME;
 	par->tok.u.name = "_bi_char";
@@ -1603,7 +1651,7 @@ builtin_random(struct var *locs, struct expr *procexpr, struct expr *args)
 	struct stmt *par;
 	int64_t seed;
 
-	par = alloc(&eval_alloc, sizeof(*par));
+	par = alloc(&eval_alloc, sizeof(struct stmt));
 	par->tag = STMT_DECL;
 	par->tok.tag = TOK_NAME;
 	par->tok.u.name = "_bi_seed";
@@ -1629,12 +1677,12 @@ builtin_exit(struct var *locs, struct expr *procexpr, struct expr *args)
 	struct var *var = NULL;
 	struct stmt *par;
 
-	par = alloc(&eval_alloc, sizeof(*par));
+	par = alloc(&eval_alloc, sizeof(struct stmt));
 	par->tag = STMT_DECL;
 	par->tok.tag = TOK_NAME;
 	par->tok.u.name = "_bi_code";
 	var = eval_args(locs, par, procexpr, args);
-	exit(words[var->addr] & 255);
+	exit((unsigned char)(words[var->addr] & 255));
 	return v;
 }
 
@@ -1645,10 +1693,10 @@ builtin_assert(struct var *locs, struct expr *procexpr, struct expr *args)
 	struct var *var = NULL;
 	struct stmt *par;
 
-	par = alloc(&eval_alloc, sizeof(*par));
+	par = alloc(&eval_alloc, sizeof(struct stmt));
 	par->tag = STMT_DECL;
 	par->tok.tag = TOK_NAME;
-	par->tok.u.name = "_bi_expr";
+	par->tok.u.name = "_bi_expression";
 	var = eval_args(locs, par, procexpr, args);
 	if (words[var->addr])
 		return v;
@@ -1660,13 +1708,13 @@ const struct {
 	const char *name;
 	struct val (*proc)(struct var *, struct expr *, struct expr *);
 } builtins[] = {
-	{"StrToInt", builtin_str_to_int}, /* StrToInt(digits)      -> int */
-	{"PutInt", builtin_put_int},      /* PutInt(i, no_newline)        */
-	{"PutChar", builtin_put_char},    /* PutChar(c)                   */
-	{"GetChar", builtin_get_char},    /* GetChar()             -> int */
-	{"Rand", builtin_random},         /* Rand(seed)            -> int */
-	{"Exit", builtin_exit},           /* Exit(code)                   */
-	{"Assert", builtin_assert},       /* Assert(expression)           */
+	{"StrToInt", builtin_str_to_int},
+	{"PutInt", builtin_put_int},
+	{"PutChar", builtin_put_char},
+	{"GetChar", builtin_get_char},
+	{"Rand", builtin_random},
+	{"Exit", builtin_exit},
+	{"Assert", builtin_assert},
 };
 
 struct var *
@@ -1679,7 +1727,7 @@ eval_args(struct var *locs, struct stmt *params, struct expr *procexpr, struct e
 	int paramcount = 0;
 
 	for (par = params, arg = args; par; par = par->next) {
-		var = alloc(&eval_alloc, sizeof(*var));
+		var = alloc(&eval_alloc, sizeof(struct var));
 		var->tok = &par->tok;
 		if (arg) {
 			v = eval_expr(locs, arg->left, 0); DEREF(v);
@@ -1695,7 +1743,7 @@ eval_args(struct var *locs, struct stmt *params, struct expr *procexpr, struct e
 		++paramcount;
 	}
 	if (arg)
-		eval_die(&procexpr->tok, "cannot pass more than `%d` arguments to `%s`",
+		eval_die(&procexpr->tok, "cannot pass more than %d argument(s) to `%s`",
 			 paramcount, procexpr->tok.u.name);
 	return calleelocs;
 }
@@ -1744,7 +1792,7 @@ eval_expr(struct var *locs, struct expr *e, int constexpr)
 {
 	struct val v = {0}, w = {0};
 	struct var *var;
-	union typepunning {
+	union typepunning { /* XXX: is this safe? */
 		int64_t u;
 		int64_t i;
 	} tp;
@@ -1946,7 +1994,7 @@ eval_stmt(struct var *locs, struct stmt *stmt)
 			v.ret = 1; /* flag to return early */
 			return v;
 		case STMT_DECL:
-			var = alloc(&eval_alloc, sizeof(*var));
+			var = alloc(&eval_alloc, sizeof(struct var));
 			var->tok = &stmt->tok;
 			if (stmt->u.decl.elems) {
 				v = eval_expr(locs, stmt->u.decl.elems, 0); DEREF(v);
@@ -1969,6 +2017,8 @@ eval_stmt(struct var *locs, struct stmt *stmt)
 				eval_die(&stmt->tok, "cannot assign to non-variable");
 			if (!v.i)
 				eval_die(&stmt->tok, "cannot assign to null");
+			assert(v.i >= 1);
+			assert(v.i < WORDS_SIZE);
 			words[v.i] = w.i;
 			break;
 		case STMT_CALL:
@@ -2004,7 +2054,7 @@ eval_stmt(struct var *locs, struct stmt *stmt)
 }
 
 int
-eval(int argc, const char **argv)
+eval(int argc, char **argv)
 {
 	struct val v = {0};
 	struct var *locs = NULL, *gvar;
@@ -2024,7 +2074,7 @@ eval(int argc, const char **argv)
 	prev_words_top = push_word(NULL, 0);
 	/* initialize globals */
 	for (gdecl = ast.globals; gdecl; gdecl = gdecl->next) {
-		gvar = alloc(&eval_alloc, sizeof(*gvar));
+		gvar = alloc(&eval_alloc, sizeof(struct var));
 		gvar->tok = &gdecl->tok;
 		if (gdecl->u.decl.elems) {
 			v = eval_expr(NULL, gdecl->u.decl.elems, 1); DEREF(v);
@@ -2059,10 +2109,10 @@ eval(int argc, const char **argv)
 				push_word(NULL, argv[i][j]);
 			push_word(NULL, 0);
 		}
-		locs = alloc(&eval_alloc, sizeof(*locs)); /* argc */
+		locs = alloc(&eval_alloc, sizeof(struct var)); /* argc */
 		locs->tok = &mainproc->params->tok;
 		locs->addr = argc_off;
-		locs->next = alloc(&eval_alloc, sizeof(*locs)); /* argv */
+		locs->next = alloc(&eval_alloc, sizeof(struct var)); /* argv */
 		locs->next->tok = &mainproc->params->next->tok;
 		locs->next->addr = argc_off + 1;
 		words[locs->next->addr] = argc_off + 2;
@@ -2077,6 +2127,8 @@ eval(int argc, const char **argv)
 				putchar(' ');
 		}
 		printf("%02x\n", (unsigned int)(words[i] & 255));
+	}
+	if (debug) {
 		debuglog(__LINE__, "calling main()");
 		clkbeg = clock();
 	}
@@ -2092,6 +2144,8 @@ eval(int argc, const char **argv)
 	memset(words, 0, words_top - prev_words_top);
 	eval_alloc.top = prev_eval_top;
 	words_top = prev_words_top;
+	assert(prev_eval_top == eval_alloc.beg);
+	assert(prev_words_top == 0);
 	return v.i & 255;
 }
 
@@ -2109,36 +2163,60 @@ usage(void)
 }
 
 int
-main(int argc, const char **argv)
+main(int argc, char **argv)
 {
 	argv0 = argv[0];
-	if (argc >= 2 && argv[1][0] == '-') {
-		if (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help")) {
+	--argc; ++argv;
+	while (argc >= 1 && argv[0][0] == '-') {
+		if (!strcmp(argv[0], "-h") || !strcmp(argv[0], "--help")) {
 			usage();
 			return 0;
-		} else if (!strcmp(argv[1], "-v")) {
+		} else if (!strcmp(argv[0], "-v")) {
 			puts(VERSION);
 			return 0;
-		} else if (!strcmp(argv[1], "-c")) {
-			puts(":)");
-			return 0;
-		} else if (!strcmp(argv[1], "-D")) {
+		} else if (!strcmp(argv[0], "-c")) {
+			evalcmd = 1;
+			--argc; ++argv;
+			break;
+		} else if (!strcmp(argv[0], "-D")) {
 			debug = 1;
 			--argc; ++argv;
+		} else {
+			usage();
+			return 2;
 		}
 	}
-	if (argc < 2) {
+	if (argc < 1) {
 		usage();
 		return 2;
 	}
-	debuglog(__LINE__, "version: %s", VERSION);
-	script_path = argv[1];
+	assert(argv[0]);
 	parse_alloc = bumpalloc_new(parse_data, sizeof(parse_data));
 	eval_alloc = bumpalloc_new(eval_data, sizeof(eval_data));
+	debuglog(__LINE__, "version: %s", VERSION);
+	if (evalcmd) { /* prog -c "SOURCE-CODE" ... */
+#ifdef __linux__
+		FILE *fmemopen(void *buf, size_t size, const char *mode);
+		script_path = "<cmd>";
+		script_file = fmemopen(argv[0], strlen(argv[0]), "r");
+		if (!script_file)
+			parse_die("cannot read command");
+#else
+		script_path = argv0;
+		parse_die("not implemented");
+#endif
+	} else {
+		script_path = argv[0];
+		script_file = fopen(script_path, "r");
+		if (!script_file)
+			parse_die("cannot open script to read");
+	}
 	parse();
+	fclose(script_file);
+	script_file = NULL;
 	if (debug) {
-		debuglog(__LINE__, "printing AST:");
+		debuglog(__LINE__, "print AST:");
 		print_program(ast);
 	}
-	return eval(--argc, ++argv);
+	return eval(argc, argv);
 }

@@ -12,8 +12,8 @@ proc main(argc, argv) {
         return 1;
     }
 
-    # There aren't strings, so argv[] is wasteful, taking up 8 bytes
-    # per character for each pointed "string".
+    # There aren't character strings, so argv[] is wasteful,
+    # since each "string" contains each character in 8 bytes (instead of 1).
 
     # Print a Fibonacci sequence number
     PutInt(fibonacci(StrToInt(argv[1]), memfib));
@@ -47,15 +47,15 @@ proc fibonacci(n, mem) { # Arguments are passed by value (mem is a pointer)
 }
 
 # Builtins:
-#   StrToInt(digits)      -> int
-#   PutInt(i, no_newline)
-#   PutChar(c)
-#   GetChar()             -> int
-#   Rand(seed)            -> int
+#   x = StrToInt(digits)        (exits on error)
+#   err = PutInt(i, no_newline) (-1 on error)
+#   err = PutChar(c)            (-1 on error)
+#   c = GetChar()               (-1 on error)
+#   x = Rand(seed)
 #   Exit(code)
 #   Assert(expression)
 
-# There is no fancy features, no bound checking, no strings.
+# There is no fancy features, no record/classes, no bound checking, no strings.
 # This is pretty much useless, just for fun!
 ```
 
