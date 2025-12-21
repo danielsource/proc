@@ -1,0 +1,32 @@
+#!/usr/bin/env proc
+
+int COLS = 8;
+int ROWS = 128 / COLS;
+
+proc main() {
+	int col, row, c;
+
+	while row < ROWS {
+		col = 0;
+		while col < COLS {
+			c = row + col * ROWS;
+			PutInt(c, 1);
+			PutChar(' ');
+			if c >= ' ' && c <= '~' { # printable
+				PutChar(c);
+			} else {
+				dim('?');
+			}
+			PutChar('\t');
+			col += 1;
+		}
+		PutChar('\n');
+		row += 1;
+	}
+}
+
+proc dim(c) {
+	PutChar('\e'); PutChar('['); PutChar('2'); PutChar('m');
+	PutChar(c);
+	PutChar('\e'); PutChar('['); PutChar('0'); PutChar('m');
+}
