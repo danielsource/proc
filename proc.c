@@ -12,12 +12,12 @@
 #include <stdio.h>
 #include <time.h>
 
-#define VERSION "WIP -- https://github.com/danielsource/proc -- public domain"
-#define TOKEN_BUF_SIZE (64)
+#define VERSION "2025-12-20 -- https://github.com/danielsource/proc"
+#define TOKEN_BUF_SIZE (80) /* 78 meaningful characters at most */
 #define PARSE_DATA_SIZE (50*1000*1000)
 #define EVAL_DATA_SIZE (50*1000*1000)
 #define WORDS_SIZE (500*1000)
-#define UNARY_PREC 10
+#define UNARY_PREC (10)
 
 #define ROUND_UP(n, to) (((n) + ((to) - 1)) & ~((to) - 1))
 #define LENGTH(x) ((int)(sizeof(x) / sizeof((x)[0])))
@@ -95,7 +95,7 @@ struct token {
 	int line, col, col_end;
 	union {
 		int64_t i;
-		const char *name;
+		const char *name; /* XXX: C strings are a major source of bugs */
 	} u;
 };
 
@@ -228,8 +228,9 @@ struct ast ast;
 
 struct var *globals;
 
-int compiletime_assert1(int [sizeof(int) >= 4   ?1:-1]);
-int compiletime_assert2(int [(int64_t)-1 == ~0  ?1:-1]);
+int compiletime_assert1(int [sizeof(int) >= 4             ?1:-1]);
+int compiletime_assert2(int [sizeof(char) < sizeof(int)   ?1:-1]);
+int compiletime_assert3(int [(int64_t)-1 == ~0            ?1:-1]);
 
 /* implementation */
 
@@ -315,7 +316,7 @@ eval_die(struct token *t, const char *msg, ...)
 }
 
 int64_t
-str_to_int(const char *digits)
+str_to_int(const char *digits) /* XXX: can't parse INT64_MIN */
 {
 	int64_t n = 0, sign = 1, base = 10, digitval;
 	const char *s;
@@ -354,7 +355,7 @@ str_to_int(const char *digits)
 			goto invalid_int_lit;
 		if (digitval >= base)
 			goto invalid_int_lit;
-		if (n > INT64_MAX / base)
+		if (n > INT64_MAX / base) /* XXX: check this */
 			parse_die("integer literal is too large: `%s` [A]", digits);
 		n *= base;
 		if (n > INT64_MAX - digitval)
@@ -444,19 +445,15 @@ next_token(void)
 	int c, i, line, col;
 	char buf[TOKEN_BUF_SIZE], *name;
 
+	if (ferror(script_file))
+		parse_die("reading script failed");
 	if (tok.tag == TOK_NULL)
 		return;
-	else if (tok_undo_top && tok_undo[tok_undo_top - 1].tag != TOK_NULL) {
+	if (tok_undo_top && tok_undo[tok_undo_top - 1].tag != TOK_NULL) {
 		tok = tok_undo[tok_undo_top - 1];
 		memset(&tok_undo[tok_undo_top - 1], 0, sizeof(*tok_undo));
 		--tok_undo_top;
 		return;
-	}
-	if (feof(script_file)) {
-		tok.tag = TOK_NULL;
-		return;
-	} else if (ferror(script_file)) {
-		parse_die("reading script failed");
 	}
 	line = tok.line;
 	col = tok.col_end;
@@ -1508,7 +1505,7 @@ struct val eval_expr(struct var *locs, struct expr *e, int constexpr);
 struct val eval_stmt(struct var *locs, struct stmt *stmt);
 
 struct val
-builtin_str_to_int(struct var *locs, struct expr *procexpr, struct expr *args) /* arity: 1 */
+builtin_str_to_int(struct var *locs, struct expr *procexpr, struct expr *args)
 {
 	struct val v = {0};
 	struct var *var = NULL;
@@ -1541,7 +1538,7 @@ builtin_str_to_int(struct var *locs, struct expr *procexpr, struct expr *args) /
 }
 
 struct val
-builtin_put_int(struct var *locs, struct expr *procexpr, struct expr *args) /* arity: 2 */
+builtin_put_int(struct var *locs, struct expr *procexpr, struct expr *args)
 {
 	struct val v = {0};
 	struct var *var = NULL;
@@ -1551,7 +1548,7 @@ builtin_put_int(struct var *locs, struct expr *procexpr, struct expr *args) /* a
 	par = alloc(&eval_alloc, sizeof(*par)); /* no newline? */
 	par->tag = STMT_DECL;
 	par->tok.tag = TOK_NAME;
-	par->tok.u.name = "_bi_nl";
+	par->tok.u.name = "_bi_no_newline";
 	par->next = alloc(&eval_alloc, sizeof(*par)); /* int */
 	par->next->tag = STMT_DECL;
 	par->next->tok.tag = TOK_NAME;
@@ -1565,7 +1562,7 @@ builtin_put_int(struct var *locs, struct expr *procexpr, struct expr *args) /* a
 }
 
 struct val
-builtin_put_char(struct var *locs, struct expr *procexpr, struct expr *args) /* arity: 1 */
+builtin_put_char(struct var *locs, struct expr *procexpr, struct expr *args)
 {
 	struct val v = {0};
 	struct var *var = NULL;
@@ -1578,28 +1575,28 @@ builtin_put_char(struct var *locs, struct expr *procexpr, struct expr *args) /* 
 	par->tok.u.name = "_bi_char";
 	var = eval_args(locs, par, procexpr, args);
 	c = fputc((unsigned char)words[var->addr], stdout);
-	v.i = c != EOF ? c : -1;
+	v.i = c == EOF ? -1 : c;
 	if (c == '\n' && fflush(stdout) == EOF)
 		v.i = -1;
 	return v;
 }
 
 struct val
-builtin_get_char(struct var *locs, struct expr *procexpr, struct expr *args) /* arity: 0 */
+builtin_get_char(struct var *locs, struct expr *procexpr, struct expr *args)
 {
 	struct val v = {0};
 	int c;
 
 	eval_args(locs, NULL, procexpr, args);
 	c = fgetc(stdin);
-	v.i = c != EOF ? c : -1;
+	v.i = c == EOF ? -1 : c;
 	return v;
 }
 
 struct val
-builtin_random(struct var *locs, struct expr *procexpr, struct expr *args) /* arity: 1 */
+builtin_random(struct var *locs, struct expr *procexpr, struct expr *args)
 {
-	static int defstate = 0;
+	static int64_t defstate = 0;
 
 	struct val v = {0};
 	struct var *var = NULL;
@@ -1626,7 +1623,7 @@ builtin_random(struct var *locs, struct expr *procexpr, struct expr *args) /* ar
 }
 
 struct val
-builtin_exit(struct var *locs, struct expr *procexpr, struct expr *args) /* arity: 1 */
+builtin_exit(struct var *locs, struct expr *procexpr, struct expr *args)
 {
 	struct val v = {0};
 	struct var *var = NULL;
@@ -1637,12 +1634,12 @@ builtin_exit(struct var *locs, struct expr *procexpr, struct expr *args) /* arit
 	par->tok.tag = TOK_NAME;
 	par->tok.u.name = "_bi_code";
 	var = eval_args(locs, par, procexpr, args);
-	exit(words[var->addr]);
+	exit(words[var->addr] & 255);
 	return v;
 }
 
 struct val
-builtin_assert(struct var *locs, struct expr *procexpr, struct expr *args) /* arity: 1 */
+builtin_assert(struct var *locs, struct expr *procexpr, struct expr *args)
 {
 	struct val v = {0};
 	struct var *var = NULL;
@@ -1663,13 +1660,13 @@ const struct {
 	const char *name;
 	struct val (*proc)(struct var *, struct expr *, struct expr *);
 } builtins[] = {
-	{"StrToInt", builtin_str_to_int},
-	{"PutInt", builtin_put_int},
-	{"PutChar", builtin_put_char},
-	{"GetChar", builtin_get_char},
-	{"Rand", builtin_random},
-	{"Exit", builtin_exit},
-	{"Assert", builtin_assert},
+	{"StrToInt", builtin_str_to_int}, /* StrToInt(digits)      -> int */
+	{"PutInt", builtin_put_int},      /* PutInt(i, no_newline)        */
+	{"PutChar", builtin_put_char},    /* PutChar(c)                   */
+	{"GetChar", builtin_get_char},    /* GetChar()             -> int */
+	{"Rand", builtin_random},         /* Rand(seed)            -> int */
+	{"Exit", builtin_exit},           /* Exit(code)                   */
+	{"Assert", builtin_assert},       /* Assert(expression)           */
 };
 
 struct var *
@@ -1768,7 +1765,7 @@ eval_expr(struct var *locs, struct expr *e, int constexpr)
 		w = eval_expr(locs, e->right, constexpr); DEREF(w);
 		if (!v.deref)
 			eval_die(&e->tok, "cannot subscript non-variable");
-		if (v.i < 0 || v.i >= WORDS_SIZE)
+		if (v.i < 0 || v.i >= WORDS_SIZE) /* XXX: check this */
 			eval_die(&e->tok, "out of bounds word access (%"PRId64") [A]", v.i);
 		tp.u = (uint64_t)words[v.i] + (uint64_t)w.i;
 		if (tp.i < 0 || tp.i >= WORDS_SIZE)
@@ -2115,21 +2112,26 @@ int
 main(int argc, const char **argv)
 {
 	argv0 = argv[0];
-	if (argc >= 2 && (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help"))) {
-		usage();
-		return 0;
-	} else if (argc >= 2 && !strcmp(argv[1], "-v")) {
-		puts(VERSION);
-		return 0;
-	} else if (argc >= 2 && !strcmp(argv[1], "-D")) {
-		debug = 1;
-		debuglog(__LINE__, "version: %s", VERSION);
-		--argc; ++argv;
+	if (argc >= 2 && argv[1][0] == '-') {
+		if (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help")) {
+			usage();
+			return 0;
+		} else if (!strcmp(argv[1], "-v")) {
+			puts(VERSION);
+			return 0;
+		} else if (!strcmp(argv[1], "-c")) {
+			puts(":)");
+			return 0;
+		} else if (!strcmp(argv[1], "-D")) {
+			debug = 1;
+			--argc; ++argv;
+		}
 	}
 	if (argc < 2) {
 		usage();
 		return 2;
 	}
+	debuglog(__LINE__, "version: %s", VERSION);
 	script_path = argv[1];
 	parse_alloc = bumpalloc_new(parse_data, sizeof(parse_data));
 	eval_alloc = bumpalloc_new(eval_data, sizeof(eval_data));
