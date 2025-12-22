@@ -208,28 +208,28 @@ struct val {
 
 /* globals */
 
-int evalcmd = 0;
-int debug = 0;
+static int evalcmd = 0;
+static int debug = 0;
 
-char *progname, *script_path;
-FILE *script_file;
+static char *progname, *script_path;
+static FILE *script_file;
 
-char parse_data[PARSE_DATA_SIZE];
-struct bumpalloc parse_alloc;
+static char parse_data[PARSE_DATA_SIZE];
+static struct bumpalloc parse_alloc;
 
-char eval_data[EVAL_DATA_SIZE];
-struct bumpalloc eval_alloc;
+static char eval_data[EVAL_DATA_SIZE];
+static struct bumpalloc eval_alloc;
 
-int64_t words[WORDS_SIZE];
-int words_top;
+static int64_t words[WORDS_SIZE];
+static int words_top;
 
-struct token tok = {TOK_START};
-struct token tok_undo[2];
-int tok_undo_top = 0;
+static struct token tok = {TOK_START};
+static struct token tok_undo[2];
+static int tok_undo_top = 0;
 
-struct ast ast;
+static struct ast ast;
 
-struct var *globals;
+static struct var *globals;
 
 int compiletime_assert1(int [sizeof(int) >= 4             ?1:-1]);
 int compiletime_assert2(int [sizeof(char) < sizeof(int)   ?1:-1]);
@@ -237,7 +237,7 @@ int compiletime_assert3(int [(int64_t)-1 == ~0            ?1:-1]); /* two's comp
 
 /* implementation */
 
-void
+static void
 debuglog(int ln, const char *msg, ...)
 {
 	va_list ap;
@@ -251,7 +251,7 @@ debuglog(int ln, const char *msg, ...)
 	fprintf(stderr, __FILE__":%d: DEBUG: %s\n", ln, s);
 }
 
-struct bumpalloc
+static struct bumpalloc
 bumpalloc_new(void *p, int capacity)
 {
 	struct bumpalloc a;
@@ -263,7 +263,7 @@ bumpalloc_new(void *p, int capacity)
 	return a;
 }
 
-void *
+static void *
 alloc(struct bumpalloc *a, int n)
 {
 	char *top, *last;
@@ -278,7 +278,7 @@ alloc(struct bumpalloc *a, int n)
 	return last;
 }
 
-void
+static void
 parse_die(const char *msg, ...)
 {
 	va_list ap;
@@ -298,7 +298,7 @@ parse_die(const char *msg, ...)
 	exit(2);
 }
 
-void
+static void
 eval_die(struct token *t, const char *msg, ...)
 {
 	va_list ap;
@@ -318,7 +318,7 @@ eval_die(struct token *t, const char *msg, ...)
 	exit(3);
 }
 
-int64_t
+static int64_t
 str_to_int(const char *digits)
 {
 	uint64_t n = 0, sign = 1, base = 10, digitval;
@@ -373,7 +373,7 @@ invalid_int:
 	return 0;
 }
 
-const char *
+static const char *
 get_token_str(struct token t)
 {
 	char *s;
@@ -443,7 +443,7 @@ get_token_str(struct token t)
 }
 
 /* tokenizer/lexer */
-void
+static void
 next_token(void)
 {
 	int c, i, line, col;
@@ -719,7 +719,7 @@ end_consuming:
 	tok.col_end = col;
 }
 
-void
+static void
 undo_token(void)
 {
 	if (tok.tag == TOK_NULL)
@@ -730,9 +730,9 @@ undo_token(void)
 	tok_undo[tok_undo_top - 1] = tok;
 }
 
-struct expr *parse_expr(int minprec);
+static struct expr *parse_expr(int minprec);
 
-struct expr *
+static struct expr *
 parse_unary_expr(void)
 {
 	struct expr *e;
@@ -767,7 +767,7 @@ parse_unary_expr(void)
 	return e;
 }
 
-enum expr_tag
+static enum expr_tag
 get_binary_expr(enum tok_tag tag, int *prec)
 {
 	switch (tag) {
@@ -797,7 +797,7 @@ get_binary_expr(enum tok_tag tag, int *prec)
 	}
 }
 
-struct expr *
+static struct expr *
 parse_binary_expr(struct expr *left, int minprec)
 {
 	struct expr *e, *right = NULL, **arg;
@@ -850,7 +850,7 @@ parse_binary_expr(struct expr *left, int minprec)
 }
 
 /* https://www.youtube.com/watch?v=fIPO4G42wYE */
-struct expr *
+static struct expr *
 parse_expr(int minprec)
 {
 	struct expr *e, *left;
@@ -864,7 +864,7 @@ parse_expr(int minprec)
 	}
 }
 
-struct stmt *
+static struct stmt *
 parse_decl(struct stmt **decl, int depth)
 {
 	while (1) {
@@ -897,7 +897,7 @@ parse_decl(struct stmt **decl, int depth)
 	}
 }
 
-void
+static void
 parse_assign(struct stmt **stmt)
 {
 	(*stmt)->u.ass.lhs = parse_expr(0);
@@ -964,9 +964,9 @@ assign_op:
 		parse_die("expected `;`, but got `%s`", get_token_str(tok));
 }
 
-struct stmt *parse_stmt(int depth);
+static struct stmt *parse_stmt(int depth);
 
-struct stmt *
+static struct stmt *
 parse_if(int depth)
 {
 	struct stmt *root = NULL, **sel;
@@ -1004,7 +1004,7 @@ parse_if(int depth)
 	}
 }
 
-struct stmt *
+static struct stmt *
 parse_while(int depth)
 {
 	struct stmt *root = NULL;
@@ -1023,7 +1023,7 @@ parse_while(int depth)
 	return root;
 }
 
-struct stmt *
+static struct stmt *
 parse_stmt(int depth)
 {
 	struct stmt *root = NULL, **stmt;
@@ -1105,7 +1105,7 @@ parse_stmt(int depth)
 	}
 }
 
-struct stmt *
+static struct stmt *
 get_decl(struct stmt *decls, const char *name)
 {
 	struct stmt *decl;
@@ -1116,7 +1116,7 @@ get_decl(struct stmt *decls, const char *name)
 	return NULL;
 }
 
-struct proc *
+static struct proc *
 get_proc(struct proc *procs, const char *name)
 {
 	struct proc *proc;
@@ -1127,7 +1127,7 @@ get_proc(struct proc *procs, const char *name)
 	return NULL;
 }
 
-void
+static void
 dummy_main_for_evalcmd(struct token first, struct expr *e, char *procname)
 {
 	debuglog(__LINE__, "generate \"proc main(argc,argv){%s(...);}\"", procname);
@@ -1157,7 +1157,7 @@ dummy_main_for_evalcmd(struct token first, struct expr *e, char *procname)
 	ast.procs->body->u.expr->right->left = e;
 }
 
-struct proc *
+static struct proc *
 parse_proc(void)
 {
 	struct proc *proc;
@@ -1199,7 +1199,7 @@ parse_proc(void)
 	return proc;
 }
 
-void
+static void
 parse(void)
 {
 	struct stmt **decl;
@@ -1254,7 +1254,7 @@ parse(void)
 	debuglog(__LINE__, "parsing...done");
 }
 
-void
+static void
 print_expr(struct expr *e, int depth)
 {
 	struct expr *arg;
@@ -1344,14 +1344,14 @@ print_expr(struct expr *e, int depth)
 	}
 }
 
-void
+static void
 print_indent(int indent)
 {
 	while (indent--)
 		fputs("  ", stdout);
 }
 
-void
+static void
 print_stmt(struct stmt *stmt, int indent)
 {
 	if (!stmt)
@@ -1449,7 +1449,7 @@ print_stmt(struct stmt *stmt, int indent)
 	}
 }
 
-void
+static void
 print_program(struct ast a)
 {
 	struct stmt *gdecl, *par;
@@ -1497,7 +1497,7 @@ print_program(struct ast a)
 	printf("==> END %s <==\n", script_path);
 }
 
-struct var *
+static struct var *
 get_var(struct var *locs, const char *name)
 {
 	struct var *var;
@@ -1511,7 +1511,7 @@ get_var(struct var *locs, const char *name)
 	return NULL;
 }
 
-int
+static int
 push_word(struct token *t, int64_t x)
 {
 	int addr;
@@ -1525,7 +1525,7 @@ push_word(struct token *t, int64_t x)
 	return addr;
 }
 
-int
+static int
 push_arr(struct token *t, int n)
 {
 	int addr;
@@ -1541,7 +1541,7 @@ push_arr(struct token *t, int n)
 	return addr;
 }
 
-uint64_t
+static uint64_t
 power(uint64_t base, uint64_t exp)
 {
 	uint64_t res = 1;
@@ -1555,11 +1555,11 @@ power(uint64_t base, uint64_t exp)
 	return res;
 }
 
-struct var *eval_args(struct var *locs, struct stmt *params, struct expr *procexpr, struct expr *args);
-struct val eval_expr(struct var *locs, struct expr *e, int constex);
-struct val eval_stmt(struct var *locs, struct stmt *stmt);
+static struct var *eval_args(struct var *locs, struct stmt *params, struct expr *procexpr, struct expr *args);
+static struct val eval_expr(struct var *locs, struct expr *e, int constex);
+static struct val eval_stmt(struct var *locs, struct stmt *stmt);
 
-struct val
+static struct val
 builtin_str_to_int(struct var *locs, struct expr *procexpr, struct expr *args)
 {
 	struct val v = {0};
@@ -1593,7 +1593,7 @@ builtin_str_to_int(struct var *locs, struct expr *procexpr, struct expr *args)
 	return v;
 }
 
-struct val
+static struct val
 builtin_put_int(struct var *locs, struct expr *procexpr, struct expr *args)
 {
 	struct val v = {0};
@@ -1648,7 +1648,7 @@ builtin_put_int(struct var *locs, struct expr *procexpr, struct expr *args)
 	return v;
 }
 
-struct val
+static struct val
 builtin_put_char(struct var *locs, struct expr *procexpr, struct expr *args)
 {
 	struct val v = {0};
@@ -1669,7 +1669,7 @@ builtin_put_char(struct var *locs, struct expr *procexpr, struct expr *args)
 	return v;
 }
 
-struct val
+static struct val
 builtin_get_char(struct var *locs, struct expr *procexpr, struct expr *args)
 {
 	struct val v = {0};
@@ -1682,7 +1682,7 @@ builtin_get_char(struct var *locs, struct expr *procexpr, struct expr *args)
 	return v;
 }
 
-struct val
+static struct val
 builtin_random(struct var *locs, struct expr *procexpr, struct expr *args)
 {
 	static int64_t defstate = 0;
@@ -1712,7 +1712,7 @@ builtin_random(struct var *locs, struct expr *procexpr, struct expr *args)
 	return v;
 }
 
-struct val
+static struct val
 builtin_exit(struct var *locs, struct expr *procexpr, struct expr *args)
 {
 	struct val v = {0};
@@ -1729,7 +1729,7 @@ builtin_exit(struct var *locs, struct expr *procexpr, struct expr *args)
 	return v;
 }
 
-struct val
+static struct val
 builtin_assert(struct var *locs, struct expr *procexpr, struct expr *args)
 {
 	struct val v = {0};
@@ -1748,7 +1748,7 @@ builtin_assert(struct var *locs, struct expr *procexpr, struct expr *args)
 	return v;
 }
 
-const struct {
+static const struct {
 	const char *name;
 	struct val (*proc)(struct var *, struct expr *, struct expr *);
 } builtins[] = {
@@ -1762,7 +1762,7 @@ const struct {
 	{"Assert", builtin_assert},
 };
 
-struct var *
+static struct var *
 eval_args(struct var *locs, struct stmt *params, struct expr *procexpr, struct expr *args)
 {
 	struct val v = {0};
@@ -1793,7 +1793,7 @@ eval_args(struct var *locs, struct stmt *params, struct expr *procexpr, struct e
 	return calleelocs;
 }
 
-struct val
+static struct val
 eval_call(struct var *locs, struct expr *e)
 {
 	struct val v = {0};
@@ -1833,7 +1833,7 @@ cleanup:
 	return v;
 }
 
-struct val
+static struct val
 eval_expr(struct var *locs, struct expr *e, int constex)
 {
 	struct val v = {0}, w = {0};
@@ -2031,7 +2031,7 @@ div_by_zero:
 	return v;
 }
 
-struct val
+static struct val
 eval_stmt(struct var *locs, struct stmt *stmt)
 {
 	struct val v = {0}, w = {0};
@@ -2107,7 +2107,7 @@ eval_stmt(struct var *locs, struct stmt *stmt)
 	return v;
 }
 
-int
+static int
 eval(int argc, char **argv)
 {
 	struct val v = {0};
@@ -2203,7 +2203,7 @@ eval(int argc, char **argv)
 	return v.i & 255;
 }
 
-void
+static void
 usage(void)
 {
 	fprintf(stdout,
