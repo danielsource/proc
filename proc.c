@@ -2208,12 +2208,17 @@ usage(void)
 {
 	fprintf(stdout,
 		"usage: %s SCRIPT [ARGUMENTS...]\n"
-		"       %s -h                        # show this\n"
-		"       %s -v                        # show version\n"
+		"       %s -h           # show this\n"
+		"       %s -v           # show version\n"
+		"       %s -c COMMAND   # evaluate COMMAND\n"
 		"\n"
 		"error format:\n"
-		"<script>:<line>:<column>: ERROR: <message>\n",
-		progname, progname, progname);
+		"<script>:<line>:<column>: ERROR: <message>\n"
+		"\n"
+		"expected entry point:\n"
+		"proc main() {}           # no command-line arguments\n"
+		"proc main(argc, argv) {} # argument count and vector\n",
+		progname, progname, progname, progname);
 }
 
 int
@@ -2248,7 +2253,7 @@ main(int argc, char **argv)
 	parse_alloc = bumpalloc_new(parse_data, sizeof(parse_data));
 	eval_alloc = bumpalloc_new(eval_data, sizeof(eval_data));
 	debuglog(__LINE__, "version: %s", VERSION);
-	if (evalcmd) { /* prog -c "SOURCE-CODE" ... */
+	if (evalcmd) {
 #ifdef __linux__
 		FILE *fmemopen(void *buf, size_t size, const char *mode);
 		script_path = "<cmd>";
