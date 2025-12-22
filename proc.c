@@ -674,8 +674,8 @@ invalid_char_lit:
 			if ((c = fgetc(script_file)) == '=') {
 				tok.tag = TOK_ASSIGN_BIT_SH_R;
 				++col;
+				goto end_consuming;
 			}
-			goto end_consuming;
 		}
 		goto end;
 	case '<':
@@ -690,8 +690,8 @@ invalid_char_lit:
 			if ((c = fgetc(script_file)) == '=') {
 				tok.tag = TOK_ASSIGN_BIT_SH_L;
 				++col;
+				goto end_consuming;
 			}
-			goto end_consuming;
 		}
 		goto end;
 	case '=':
@@ -1639,6 +1639,8 @@ builtin_put_int(struct var *locs, struct expr *procexpr, struct expr *args)
 			ret = printf("%014"PRIx64"%s", tp.u, no_nl ? "" : "\n");
 		else if (tp.u <= 0xffffffffffffffff)
 			ret = printf("%016"PRIx64"%s", tp.u, no_nl ? "" : "\n");
+		else
+			assert(!"unexpected state");
 	} else {
 		ret = printf("%"PRId64"%s", tp.i, no_nl ? "" : "\n");
 	}
@@ -1822,6 +1824,7 @@ eval_call(struct var *locs, struct expr *e)
 			}
 		}
 		eval_die(&procexpr->tok, "procedure undefined: `%s`", procname);
+		assert(!"unexpected state");
 	}
 	/* call */
 	v = eval_stmt(eval_args(locs, proc->params, procexpr, e->right), proc->body); DEREF(v);
@@ -1923,11 +1926,12 @@ eval_expr(struct var *locs, struct expr *e, int constex)
 	case EXPR_MUL:
 		v = eval_expr(locs, e->left, constex); DEREF(v);
 		w = eval_expr(locs, e->right, constex); DEREF(w);
-		if (v.i == INT64_MIN && w.i == -1)
-			tp.u = INT64_MIN;
-		else
+		if (v.i == INT64_MIN && w.i == -1) {
+			v.i = INT64_MIN;
+		} else {
 			tp.u = (uint64_t)v.i * (uint64_t)w.i;
-		v.i = tp.i;
+			v.i = tp.i;
+		}
 		break;
 	case EXPR_SUB:
 		v = eval_expr(locs, e->left, constex); DEREF(v);
