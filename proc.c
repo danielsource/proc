@@ -102,7 +102,7 @@ typedef struct {
 typedef struct {
 	struct Statement *globals;
 	struct Procedure *procs;
-} AST;
+} Ast;
 
 typedef struct Procedure {
 	Token tok;
@@ -206,37 +206,41 @@ typedef struct {
 
 /* function declarations */
 
-static void         debuglog(int ln, const char *msg, ...);
-static BumpAlloc    bumpalloc_new(void *p, int capacity);
-static void *       alloc(BumpAlloc *a, int n);
-static void         parse_die(const char *msg, ...);
-static void         eval_die(Token *t, const char *msg, ...);
-static int64_t      str_to_int(const char *digits);
-static const char * get_token_str(Token t);
-static void         next_token(void);
-static void         undo_token(void);
-static Expression * parse_unary_expr(void);
-static ExprTag      get_binary_expr(TokTag tag, int *prec);
-static Expression * parse_binary_expr(Expression *left, int minprec);
-static Expression * parse_expr(int minprec);
-static Statement *  parse_decl(Statement **decl_list, int depth);
-static void         parse_assign(Statement **stmt_list);
-static Statement *  parse_if(int depth);
-static Statement *  parse_while(int depth);
-static Statement *  parse_stmt(int depth);
-static Statement *  get_decl(Statement *decls, const char *name);
-static Procedure *  get_proc(Procedure *procs, const char *name);
+/* utilities */
+static void         usage(void);
+static void         debuglog(int ln, const char *msg, ...);        /* print debug messages */
+static BumpAlloc    bumpalloc_new(void *p, int capacity);          /* create new bump/arena allocator */
+static void *       alloc(BumpAlloc *a, int n);                    /* allocate in allocator */
+static uint64_t     power(uint64_t base, uint64_t exp);            /* exponentiation with positives */
+static int64_t      str_to_int(const char *digits);                /* string to int64_t */
+static Procedure *  get_proc(Procedure *procs, const char *name);  /* get procedure by name */
+static Statement *  get_decl(Statement *decls, const char *name);  /* get parameter by name */
+static const char * get_token_str(Token t);                        /* get token string representation */
+static Statement *  make_param(const char *name, Statement *last); /* allocate new parameter */
 static void         dummy_main_for_evalcmd(Token first, Expression *e, char *procname);
-static Procedure *  parse_proc(void);
-static void         parse(void);
 static void         print_expr(Expression *e, int depth);
 static void         print_indent(int indent);
 static void         print_stmt(Statement *stmt, int indent);
-static void         print_program(AST a);
-static Variable *   get_var(Variable *locs, const char *name);
-static int          push_word(Token *t, int64_t x);
-static int          push_arr(Token *t, int n);
-static uint64_t     power(uint64_t base, uint64_t exp);
+static void         print_program(Ast a);                          /* print AST */
+
+/* parsing */
+static void         parse_die(const char *msg, ...);               /* "syntax" error */
+static void         next_token(void);                              /* tokenize on demand; save token in `tok` */
+static void         undo_token(void);                              /* save `tok` for a later `next_token` */
+static ExprTag      get_binary_expr(TokTag tag, int *prec);        /* get expression and precedence by `tag` */
+static Expression * parse_unary_expr(void);                        /* leaf node in "pratt" parser */
+static Expression * parse_binary_expr(Expression *left, int minprec); /* inner node "pratt" parser */
+static Expression * parse_expr(int minprec);                       /* "pratt" parser; https://youtu.be/fIPO4G42wYE */
+static Statement *  parse_decl(Statement **decl_list, int depth);  /* parse declaration list */
+static void         parse_assign(Statement **stmt_list);           /* parse assignment */
+static Statement *  parse_if(int depth);                           /* parse if expr {...} */
+static Statement *  parse_while(int depth);                        /* parse while expr {...} */
+static Statement *  parse_stmt(int depth);                         /* parse statement */
+static Procedure *  parse_proc(void);                              /* parse procedure */
+static void         parse(void);                                   /* parse AST */
+
+/* evaluation */
+static void         eval_die(Token *t, const char *msg, ...);      /* "semantic" error */
 static Value        builtin_str_to_int(Variable *locs, Expression *procexpr, Expression *args);
 static Value        builtin_put_int(Variable *locs, Expression *procexpr, Expression *args);
 static Value        builtin_put_char(Variable *locs, Expression *procexpr, Expression *args);
@@ -244,12 +248,15 @@ static Value        builtin_get_char(Variable *locs, Expression *procexpr, Expre
 static Value        builtin_random(Variable *locs, Expression *procexpr, Expression *args);
 static Value        builtin_exit(Variable *locs, Expression *procexpr, Expression *args);
 static Value        builtin_assert(Variable *locs, Expression *procexpr, Expression *args);
-static Variable *   eval_args(Variable *locs, Statement *params, Expression *procexpr, Expression *args);
-static Value        eval_call(Variable *locs, Expression *e);
-static Value        eval_expr(Variable *locs, Expression *e, int constex);
-static Value        eval_stmt(Variable *locs, Statement *stmt);
-static int          eval(int argc, char **argv);
-static void         usage(void);
+static int          push_word(Token *t, int64_t x);                /* allocate word in `words` */
+static int          push_arr(Token *t, int n);                     /* allocate `n` words in `words` */
+static Variable *   get_var(Variable *locs, const char *name);     /* get local/global variable by name */
+static Variable *   eval_args(Variable *locs, Statement *params,   /* evaluate procedure call arguments */
+                              Expression *procexpr, Expression *args);
+static Value        eval_call(Variable *locs, Expression *e);      /* evaluate procedure call */
+static Value        eval_expr(Variable *locs, Expression *e, int constex); /* evaluate expression */
+static Value        eval_stmt(Variable *locs, Statement *stmt);    /* evaluate statement */
+static int          eval(int argc, char **argv);                   /* evaluate AST */
 
 /* globals */
 
@@ -272,7 +279,7 @@ static Token tok = {TOK_START, 0, 0, 0, {0}};
 static Token tok_undo[TOKEN_UNDO_SIZE];
 static int tok_undo_top = 0;
 
-static AST ast;
+static Ast ast;
 
 static Variable *globals;
 
@@ -295,6 +302,24 @@ int compiletime_assert1(int [sizeof(int) >= 4   ?1:-1]);
 int compiletime_assert2(int [(int64_t)-1 == ~0  ?1:-1]); /* two's complement */
 
 /* implementation */
+
+void
+usage(void)
+{
+	fprintf(stdout,
+		"usage: %s SCRIPT [ARGUMENTS...]\n"
+		"       %s -h           # show this\n"
+		"       %s -v           # show version\n"
+		"       %s -c COMMAND   # evaluate COMMAND\n"
+		"\n"
+		"error format:\n"
+		"<script>:<line>:<column>: ERROR: <message>\n"
+		"\n"
+		"expected entry point:\n"
+		"proc main() {}           # no command-line arguments\n"
+		"proc main(argc, argv) {} # argument count and vector\n",
+		progname, progname, progname, progname);
+}
 
 void
 debuglog(int ln, const char *msg, ...)
@@ -337,44 +362,18 @@ alloc(BumpAlloc *a, int n)
 	return last;
 }
 
-void
-parse_die(const char *msg, ...)
+uint64_t
+power(uint64_t base, uint64_t exp)
 {
-	va_list ap;
-	char s[TOKEN_BUF_SIZE * 4];
+	uint64_t res = 1;
 
-	va_start(ap, msg);
-	vsprintf(s, msg, ap);
-	va_end(ap);
-	if (tok.line > 0 && tok.col > 0)
-		fprintf(stderr, "%s:%d:%d: ERROR: %s\n", script_path, tok.line, tok.col, s);
-	else
-		fprintf(stderr, "%s: ERROR: %s\n", script_path, s);
-	if (script_file)
-		fclose(script_file);
-	if (debug)
-		abort();
-	exit(2);
-}
-
-void
-eval_die(Token *t, const char *msg, ...)
-{
-	va_list ap;
-	char s[TOKEN_BUF_SIZE * 4];
-
-	va_start(ap, msg);
-	vsprintf(s, msg, ap);
-	va_end(ap);
-	if (t && t->line > 0 && t->col > 0)
-		fprintf(stderr, "%s:%d:%d: ERROR: %s\n", script_path, t->line, t->col, s);
-	else
-		fprintf(stderr, "%s: ERROR: %s\n", script_path, s);
-	if (script_file)
-		fclose(script_file);
-	if (debug)
-		abort();
-	exit(3);
+	while (exp > 0) {
+		if (exp & 1)
+			res *= base;
+		base *= base;
+		exp >>= 1;
+	}
+	return res;
 }
 
 int64_t
@@ -430,6 +429,28 @@ str_to_int(const char *digits)
 invalid_int:
 	parse_die("invalid integer: `%s`", digits);
 	return 0;
+}
+
+Procedure *
+get_proc(Procedure *procs, const char *name)
+{
+	Procedure *proc;
+
+	for (proc = procs; proc; proc = proc->next)
+		if (!strcmp(name, proc->tok.name))
+			return proc;
+	return NULL;
+}
+
+Statement *
+get_decl(Statement *decls, const char *name)
+{
+	Statement *decl;
+
+	for (decl = decls; decl; decl = decl->next)
+		if (!strcmp(name, decl->tok.name))
+			return decl;
+	return NULL;
 }
 
 const char *
@@ -499,6 +520,306 @@ get_token_str(Token t)
 		assert(!"unexpected state");
 		return NULL;
 	}
+}
+
+Statement *
+make_param(const char *name, Statement *last)
+{
+	Statement *par;
+
+	par = alloc(&eval_alloc, sizeof(Statement));
+	par->tag = STMT_DECL;
+	par->tok.tag = TOK_NAME;
+	par->tok.name = name;
+	if (last)
+		last->next = par;
+	return par;
+}
+
+void
+dummy_main_for_evalcmd(Token first, Expression *e, char *procname)
+{
+	debuglog(__LINE__, "generate \"proc main(argc,argv){%s(...);}\"", procname);
+	ast.procs = alloc(&parse_alloc, sizeof(Procedure));
+	ast.procs->tok.tag = TOK_NAME;
+	ast.procs->tok.name = "main";
+	ast.procs->params = make_param("argc", NULL); make_param("argv", ast.procs->params);
+	ast.procs->body = alloc(&parse_alloc, sizeof(Statement));
+	ast.procs->body->tag = STMT_CALL;
+	ast.procs->body->expr = alloc(&parse_alloc, sizeof(Expression));
+	ast.procs->body->expr->tag = EXPR_CALL;
+	ast.procs->body->expr->tok.tag = TOK_PAREN_L;
+	ast.procs->body->expr->left = alloc(&parse_alloc, sizeof(Expression));
+	ast.procs->body->expr->left->tag = EXPR_NAME;
+	ast.procs->body->expr->left->tok.tag = TOK_NAME;
+	ast.procs->body->expr->left->tok.name = procname;
+	ast.procs->body->expr->right = alloc(&parse_alloc, sizeof(Expression));
+	ast.procs->body->expr->right->tag = EXPR_ARGS;
+	ast.procs->body->expr->right->tok = first;
+	ast.procs->body->expr->right->left = e;
+}
+
+void
+print_expr(Expression *e, int depth)
+{
+	Expression *arg;
+
+	switch (e->tag) {
+	case EXPR_INT:
+	case EXPR_NAME:
+		fputs(get_token_str(e->tok), stdout);
+		break;
+	case EXPR_ARRIDX:
+		if (depth)
+			fputs("(", stdout);
+		print_expr(e->left, depth + 1);
+		fputs("[", stdout);
+		print_expr(e->right, 0);
+		fputs("]", stdout);
+		if (depth)
+			fputs(")", stdout);
+		break;
+	case EXPR_CALL:
+		print_expr(e->left, depth + 1);
+		fputs("(", stdout);
+		if (e->right) {
+			for (arg = e->right; arg->right; arg = arg->right) {
+				print_expr(arg->left, 0);
+				fputs(", ", stdout);
+			}
+			print_expr(arg->left, 0);
+		}
+		fputs(")", stdout);
+		break;
+	case EXPR_ADDROF:
+	case EXPR_POS:
+	case EXPR_NEG:
+	case EXPR_NOT:
+	case EXPR_BIT_NOT:
+		if (depth)
+			fputs("(", stdout);
+		fputs(get_token_str(e->tok), stdout);
+		fputs("(", stdout);
+		print_expr(e->left, 0);
+		fputs(")", stdout);
+		if (depth)
+			fputs(")", stdout);
+		break;
+	case EXPR_POW:
+		if (depth)
+			fputs("(", stdout);
+		print_expr(e->left, depth + 1);
+		fputs(" ", stdout);
+		fputs(get_token_str(e->tok), stdout);
+		fputs(" ", stdout);
+		print_expr(e->right, depth + 1);
+		if (depth)
+			fputs(")", stdout);
+		break;
+	case EXPR_REM:
+	case EXPR_DIV:
+	case EXPR_MUL:
+	case EXPR_SUB:
+	case EXPR_ADD:
+	case EXPR_BIT_SH_R:
+	case EXPR_BIT_SH_L:
+	case EXPR_GE:
+	case EXPR_GT:
+	case EXPR_LE:
+	case EXPR_LT:
+	case EXPR_NE:
+	case EXPR_EQ:
+	case EXPR_BIT_AND:
+	case EXPR_BIT_XOR:
+	case EXPR_BIT_OR:
+	case EXPR_AND:
+	case EXPR_OR:
+		if (depth)
+			fputs("(", stdout);
+		print_expr(e->left, depth + 1);
+		fputs(" ", stdout);
+		fputs(get_token_str(e->tok), stdout);
+		fputs(" ", stdout);
+		print_expr(e->right, depth + 1);
+		if (depth)
+			fputs(")", stdout);
+		break;
+	default:
+		assert(!"unexpected state");
+	}
+}
+
+void
+print_indent(int indent)
+{
+	while (indent--)
+		fputs("  ", stdout);
+}
+
+void
+print_stmt(Statement *stmt, int indent)
+{
+	if (!stmt)
+		return;
+	print_indent(indent);
+	switch (stmt->tag) {
+	case STMT_RETURN:
+		fputs("return", stdout);
+		if (stmt->expr) {
+			fputs(" ", stdout);
+			print_expr(stmt->expr, 0);
+		}
+		printf(";\t# %d:%d:%d\n",
+		       stmt->tok.line,
+		       stmt->tok.col,
+		       stmt->tok.col_end);
+		return;
+	case STMT_DECL:
+		fputs("int ", stdout);
+		while (1) {
+			fputs(stmt->tok.name, stdout);
+			if (stmt->decl.elems) {
+				fputs("[", stdout);
+				print_expr(stmt->decl.elems, 0);
+				fputs("]", stdout);
+			} else if (stmt->decl.expr) {
+				fputs(" = ", stdout);
+				print_expr(stmt->decl.expr, 0);
+			}
+			if (!stmt->next || stmt->next->tag != STMT_DECL)
+				break;
+			printf(",\t# %d:%d:%d\n",
+			       stmt->tok.line,
+			       stmt->tok.col,
+			       stmt->tok.col_end);
+			print_indent(indent);
+			fputs("    ", stdout);
+			stmt = stmt->next;
+		}
+		printf(";\t# %d:%d:%d\n",
+		       stmt->tok.line,
+		       stmt->tok.col,
+		       stmt->tok.col_end);
+		print_stmt(stmt->next, indent);
+		return;
+	case STMT_ASSIGN:
+		print_expr(stmt->ass.lhs, 0);
+		fputs(" = ", stdout);
+		print_expr(stmt->ass.rhs, 0);
+		printf(";\t# %d:%d:%d\n",
+		       stmt->tok.line,
+		       stmt->tok.col,
+		       stmt->tok.col_end);
+		print_stmt(stmt->next, indent);
+		return;
+	case STMT_CALL:
+		print_expr(stmt->expr, 0);
+		printf(";\t# %d:%d:%d\n",
+		       stmt->tok.line,
+		       stmt->tok.col,
+		       stmt->tok.col_end);
+		print_stmt(stmt->next, indent);
+		return;
+	case STMT_SELECT:
+		fputs("if ", stdout);
+		print_expr(stmt->sel.cond, 0);
+		printf(" {\t# %d:%d:%d\n",
+		       stmt->tok.line,
+			       stmt->tok.col,
+			       stmt->tok.col_end);
+		print_stmt(stmt->sel.ifbody, indent + 1);
+		print_indent(indent);
+		if (stmt->sel.elsebody) {
+			fputs("} else {\n", stdout);
+			print_stmt(stmt->sel.elsebody, indent + 1);
+			print_indent(indent);
+		}
+		fputs("}\n", stdout);
+		print_stmt(stmt->next, indent);
+		return;
+	case STMT_LOOP:
+		fputs("while ", stdout);
+		print_expr(stmt->loop.cond, 0);
+		printf(" {\t# %d:%d:%d\n",
+		       stmt->tok.line,
+		       stmt->tok.col,
+		       stmt->tok.col_end);
+		print_stmt(stmt->loop.body, indent + 1);
+		print_indent(indent);
+		fputs("}\n", stdout);
+		print_stmt(stmt->next, indent);
+		return;
+	default:
+		assert(!"unexpected state");
+	}
+}
+
+void
+print_program(Ast a)
+{
+	Statement *gdecl, *par;
+	Procedure *proc;
+
+	printf("==> %s <==\n", script_path);
+	if (a.globals)
+		fputs("# globals\n", stdout);
+	for (gdecl = a.globals; gdecl; gdecl = gdecl->next) {
+		if (gdecl->decl.elems) {
+			printf("int %s[", gdecl->tok.name);
+			print_expr(gdecl->decl.elems, 0);
+			fputs("];", stdout);
+		} else if (gdecl->decl.expr) {
+			printf("int %s = ", gdecl->tok.name);
+			print_expr(gdecl->decl.expr, 0);
+			fputs(";", stdout);
+		} else {
+			printf("int %s;", gdecl->tok.name);
+		}
+		printf(" # %d:%d:%d\n",
+		       gdecl->tok.line,
+		       gdecl->tok.col,
+		       gdecl->tok.col_end);
+	}
+	if (a.globals)
+		fputs("\n", stdout);
+	if (a.procs)
+		fputs("# procedures (printed reversed)\n", stdout);
+	for (proc = a.procs; proc; proc = proc->next) {
+		printf("proc %s(", proc->tok.name);
+		if (proc->params) {
+			for (par = proc->params; par->next; par = par->next)
+				printf("%s, ", par->tok.name);
+			fputs(par->tok.name, stdout);
+		}
+		fputs(") {", stdout);
+		printf(" # %d:%d:%d\n",
+		       proc->tok.line,
+		       proc->tok.col,
+		       proc->tok.col_end);
+		print_stmt(proc->body, 1);
+		fputs("}\n", stdout);
+	}
+	printf("==> END %s <==\n", script_path);
+}
+
+void
+parse_die(const char *msg, ...)
+{
+	va_list ap;
+	char s[TOKEN_BUF_SIZE * 4];
+
+	va_start(ap, msg);
+	vsprintf(s, msg, ap);
+	va_end(ap);
+	if (tok.line > 0 && tok.col > 0)
+		fprintf(stderr, "%s:%d:%d: ERROR: %s\n", script_path, tok.line, tok.col, s);
+	else
+		fprintf(stderr, "%s: ERROR: %s\n", script_path, s);
+	if (script_file)
+		fclose(script_file);
+	if (debug)
+		abort();
+	exit(2);
 }
 
 /* tokenizer/lexer */
@@ -789,6 +1110,36 @@ undo_token(void)
 	tok_undo[tok_undo_top - 1] = tok;
 }
 
+ExprTag
+get_binary_expr(TokTag tag, int *prec)
+{
+	switch (tag) {
+	case TOK_BRACKET_L:      *prec = 12; return EXPR_ARRIDX;
+	case TOK_PAREN_L:        *prec = 12; return EXPR_CALL;
+	case TOK_ASTERISK2:      *prec = 11; return EXPR_POW;
+	                         /* UNARY_PREC is between these */
+	case TOK_PERCENT:        *prec = 10; return EXPR_REM;
+	case TOK_SLASH:          *prec = 10; return EXPR_DIV;
+	case TOK_ASTERISK:       *prec = 10; return EXPR_MUL;
+	case TOK_MINUS:          *prec = 9; return EXPR_SUB;
+	case TOK_PLUS:           *prec = 9; return EXPR_ADD;
+	case TOK_SHIFT_R:        *prec = 8; return EXPR_BIT_SH_R;
+	case TOK_SHIFT_L:        *prec = 8; return EXPR_BIT_SH_L;
+	case TOK_GREATER_EQUALS: *prec = 7; return EXPR_GE;
+	case TOK_GREATER:        *prec = 7; return EXPR_GT;
+	case TOK_LESS_EQUALS:    *prec = 7; return EXPR_LE;
+	case TOK_LESS:           *prec = 7; return EXPR_LT;
+	case TOK_NOT_EQUALS:     *prec = 6; return EXPR_NE;
+	case TOK_EQUALS:         *prec = 6; return EXPR_EQ;
+	case TOK_AMPERSAND:      *prec = 5; return EXPR_BIT_AND;
+	case TOK_CARET:          *prec = 4; return EXPR_BIT_XOR;
+	case TOK_PIPE:           *prec = 3; return EXPR_BIT_OR;
+	case TOK_AND:            *prec = 2; return EXPR_AND;
+	case TOK_OR:             *prec = 1; return EXPR_OR;
+	default:                 *prec = 0; return EXPR_INVALID;
+	}
+}
+
 Expression *
 parse_unary_expr(void)
 {
@@ -822,36 +1173,6 @@ parse_unary_expr(void)
 	}
 	e->left = parse_expr(UNARY_PREC);
 	return e;
-}
-
-ExprTag
-get_binary_expr(TokTag tag, int *prec)
-{
-	switch (tag) {
-	case TOK_BRACKET_L:      *prec = 12; return EXPR_ARRIDX;
-	case TOK_PAREN_L:        *prec = 12; return EXPR_CALL;
-	case TOK_ASTERISK2:      *prec = 11; return EXPR_POW;
-	                         /* UNARY_PREC is between these */
-	case TOK_PERCENT:        *prec = 10; return EXPR_REM;
-	case TOK_SLASH:          *prec = 10; return EXPR_DIV;
-	case TOK_ASTERISK:       *prec = 10; return EXPR_MUL;
-	case TOK_MINUS:          *prec = 9; return EXPR_SUB;
-	case TOK_PLUS:           *prec = 9; return EXPR_ADD;
-	case TOK_SHIFT_R:        *prec = 8; return EXPR_BIT_SH_R;
-	case TOK_SHIFT_L:        *prec = 8; return EXPR_BIT_SH_L;
-	case TOK_GREATER_EQUALS: *prec = 7; return EXPR_GE;
-	case TOK_GREATER:        *prec = 7; return EXPR_GT;
-	case TOK_LESS_EQUALS:    *prec = 7; return EXPR_LE;
-	case TOK_LESS:           *prec = 7; return EXPR_LT;
-	case TOK_NOT_EQUALS:     *prec = 6; return EXPR_NE;
-	case TOK_EQUALS:         *prec = 6; return EXPR_EQ;
-	case TOK_AMPERSAND:      *prec = 5; return EXPR_BIT_AND;
-	case TOK_CARET:          *prec = 4; return EXPR_BIT_XOR;
-	case TOK_PIPE:           *prec = 3; return EXPR_BIT_OR;
-	case TOK_AND:            *prec = 2; return EXPR_AND;
-	case TOK_OR:             *prec = 1; return EXPR_OR;
-	default:                 *prec = 0; return EXPR_INVALID;
-	}
 }
 
 Expression *
@@ -906,7 +1227,6 @@ parse_binary_expr(Expression *left, int minprec)
 	return e;
 }
 
-/* https://www.youtube.com/watch?v=fIPO4G42wYE */
 Expression *
 parse_expr(int minprec)
 {
@@ -1160,58 +1480,6 @@ parse_stmt(int depth)
 	}
 }
 
-Statement *
-get_decl(Statement *decls, const char *name)
-{
-	Statement *decl;
-
-	for (decl = decls; decl; decl = decl->next)
-		if (!strcmp(name, decl->tok.name))
-			return decl;
-	return NULL;
-}
-
-Procedure *
-get_proc(Procedure *procs, const char *name)
-{
-	Procedure *proc;
-
-	for (proc = procs; proc; proc = proc->next)
-		if (!strcmp(name, proc->tok.name))
-			return proc;
-	return NULL;
-}
-
-void
-dummy_main_for_evalcmd(Token first, Expression *e, char *procname)
-{
-	debuglog(__LINE__, "generate \"proc main(argc,argv){%s(...);}\"", procname);
-	ast.procs = alloc(&parse_alloc, sizeof(Procedure));
-	ast.procs->tok.tag = TOK_NAME;
-	ast.procs->tok.name = "main";
-	ast.procs->params = alloc(&parse_alloc, sizeof(Statement));
-	ast.procs->params->tag = STMT_DECL;
-	ast.procs->params->tok.tag = TOK_NAME;
-	ast.procs->params->tok.name = "argc";
-	ast.procs->params->next = alloc(&parse_alloc, sizeof(Statement));
-	ast.procs->params->next->tag = STMT_DECL;
-	ast.procs->params->next->tok.tag = TOK_NAME;
-	ast.procs->params->next->tok.name = "argv";
-	ast.procs->body = alloc(&parse_alloc, sizeof(Statement));
-	ast.procs->body->tag = STMT_CALL;
-	ast.procs->body->expr = alloc(&parse_alloc, sizeof(Expression));
-	ast.procs->body->expr->tag = EXPR_CALL;
-	ast.procs->body->expr->tok.tag = TOK_PAREN_L;
-	ast.procs->body->expr->left = alloc(&parse_alloc, sizeof(Expression));
-	ast.procs->body->expr->left->tag = EXPR_NAME;
-	ast.procs->body->expr->left->tok.tag = TOK_NAME;
-	ast.procs->body->expr->left->tok.name = procname;
-	ast.procs->body->expr->right = alloc(&parse_alloc, sizeof(Expression));
-	ast.procs->body->expr->right->tag = EXPR_ARGS;
-	ast.procs->body->expr->right->tok = first;
-	ast.procs->body->expr->right->left = e;
-}
-
 Procedure *
 parse_proc(void)
 {
@@ -1259,8 +1527,8 @@ parse(void)
 {
 	Statement **decl_list;
 	Procedure *proc;
-	Expression *cmdexpr;
-	Token cmdargtok, conv;
+	Expression *cmd_expr;
+	Token cmd_arg_tok, conv_tok;
 
 	memset(&ast, 0, sizeof(ast));
 	decl_list = &ast.globals;
@@ -1284,23 +1552,23 @@ parse(void)
 			return;
 		default:
 			if (evalcmd) { /* try to read an expression instead of a program */
-				cmdargtok = tok;
+				cmd_arg_tok = tok;
 				undo_token();
 				debuglog(__LINE__, "trying to parse expression...");
-				cmdexpr = parse_expr(0);
+				cmd_expr = parse_expr(0);
 				debuglog(__LINE__, "trying to parse expression...done");
 				next_token();
-				conv = tok;
-				if (conv.tag == TOK_NAME && !strcmp(conv.name, "to") && (next_token(),1) &&
-				    tok.tag == TOK_NAME && !strcmp(tok.name, "hex") && (next_token(),1) &&
-				    tok.tag == TOK_NULL) {
-					dummy_main_for_evalcmd(cmdargtok, cmdexpr, "PutHex");
+				conv_tok = tok;
+				if (conv_tok.tag == TOK_NAME && !strcmp(conv_tok.name, "to") &&
+				    (next_token(),1) && tok.tag == TOK_NAME && !strcmp(tok.name, "hex") &&
+				    (next_token(),1) && tok.tag == TOK_NULL) {
+					dummy_main_for_evalcmd(cmd_arg_tok, cmd_expr, "PutHex");
 					return;
-				} else if (conv.tag == TOK_NULL) {
-					dummy_main_for_evalcmd(cmdargtok, cmdexpr, "PutInt");
+				} else if (conv_tok.tag == TOK_NULL) {
+					dummy_main_for_evalcmd(cmd_arg_tok, cmd_expr, "PutInt");
 					return;
 				}
-				tok = conv;
+				tok = conv_tok;
 				parse_die("unexpected symbol after expression: `%s`", get_token_str(tok));
 			}
 			parse_die("expected `int` or `proc`, but got `%s`", get_token_str(tok));
@@ -1310,304 +1578,23 @@ parse(void)
 }
 
 void
-print_expr(Expression *e, int depth)
+eval_die(Token *t, const char *msg, ...)
 {
-	Expression *arg;
+	va_list ap;
+	char s[TOKEN_BUF_SIZE * 4];
 
-	switch (e->tag) {
-	case EXPR_INT:
-	case EXPR_NAME:
-		fputs(get_token_str(e->tok), stdout);
-		break;
-	case EXPR_ARRIDX:
-		if (depth)
-			fputs("(", stdout);
-		print_expr(e->left, depth + 1);
-		fputs("[", stdout);
-		print_expr(e->right, 0);
-		fputs("]", stdout);
-		if (depth)
-			fputs(")", stdout);
-		break;
-	case EXPR_CALL:
-		print_expr(e->left, depth + 1);
-		fputs("(", stdout);
-		if (e->right) {
-			for (arg = e->right; arg->right; arg = arg->right) {
-				print_expr(arg->left, 0);
-				fputs(", ", stdout);
-			}
-			print_expr(arg->left, 0);
-		}
-		fputs(")", stdout);
-		break;
-	case EXPR_ADDROF:
-	case EXPR_POS:
-	case EXPR_NEG:
-	case EXPR_NOT:
-	case EXPR_BIT_NOT:
-		if (depth)
-			fputs("(", stdout);
-		fputs(get_token_str(e->tok), stdout);
-		fputs("(", stdout);
-		print_expr(e->left, 0);
-		fputs(")", stdout);
-		if (depth)
-			fputs(")", stdout);
-		break;
-	case EXPR_POW:
-		if (depth)
-			fputs("(", stdout);
-		print_expr(e->left, depth + 1);
-		fputs(" ", stdout);
-		fputs(get_token_str(e->tok), stdout);
-		fputs(" ", stdout);
-		print_expr(e->right, depth + 1);
-		if (depth)
-			fputs(")", stdout);
-		break;
-	case EXPR_REM:
-	case EXPR_DIV:
-	case EXPR_MUL:
-	case EXPR_SUB:
-	case EXPR_ADD:
-	case EXPR_BIT_SH_R:
-	case EXPR_BIT_SH_L:
-	case EXPR_GE:
-	case EXPR_GT:
-	case EXPR_LE:
-	case EXPR_LT:
-	case EXPR_NE:
-	case EXPR_EQ:
-	case EXPR_BIT_AND:
-	case EXPR_BIT_XOR:
-	case EXPR_BIT_OR:
-	case EXPR_AND:
-	case EXPR_OR:
-		if (depth)
-			fputs("(", stdout);
-		print_expr(e->left, depth + 1);
-		fputs(" ", stdout);
-		fputs(get_token_str(e->tok), stdout);
-		fputs(" ", stdout);
-		print_expr(e->right, depth + 1);
-		if (depth)
-			fputs(")", stdout);
-		break;
-	default:
-		assert(!"unexpected state");
-	}
-}
-
-void
-print_indent(int indent)
-{
-	while (indent--)
-		fputs("  ", stdout);
-}
-
-void
-print_stmt(Statement *stmt, int indent)
-{
-	if (!stmt)
-		return;
-	print_indent(indent);
-	switch (stmt->tag) {
-	case STMT_RETURN:
-		fputs("return", stdout);
-		if (stmt->expr) {
-			fputs(" ", stdout);
-			print_expr(stmt->expr, 0);
-		}
-		printf(";\t# %d:%d:%d\n",
-		       stmt->tok.line,
-		       stmt->tok.col,
-		       stmt->tok.col_end);
-		return;
-	case STMT_DECL:
-		fputs("int ", stdout);
-		while (1) {
-			fputs(stmt->tok.name, stdout);
-			if (stmt->decl.elems) {
-				fputs("[", stdout);
-				print_expr(stmt->decl.elems, 0);
-				fputs("]", stdout);
-			} else if (stmt->decl.expr) {
-				fputs(" = ", stdout);
-				print_expr(stmt->decl.expr, 0);
-			}
-			if (!stmt->next || stmt->next->tag != STMT_DECL)
-				break;
-			printf(",\t# %d:%d:%d\n",
-			       stmt->tok.line,
-			       stmt->tok.col,
-			       stmt->tok.col_end);
-			print_indent(indent);
-			fputs("    ", stdout);
-			stmt = stmt->next;
-		}
-		printf(";\t# %d:%d:%d\n",
-		       stmt->tok.line,
-		       stmt->tok.col,
-		       stmt->tok.col_end);
-		print_stmt(stmt->next, indent);
-		return;
-	case STMT_ASSIGN:
-		print_expr(stmt->ass.lhs, 0);
-		fputs(" = ", stdout);
-		print_expr(stmt->ass.rhs, 0);
-		printf(";\t# %d:%d:%d\n",
-		       stmt->tok.line,
-		       stmt->tok.col,
-		       stmt->tok.col_end);
-		print_stmt(stmt->next, indent);
-		return;
-	case STMT_CALL:
-		print_expr(stmt->expr, 0);
-		printf(";\t# %d:%d:%d\n",
-		       stmt->tok.line,
-		       stmt->tok.col,
-		       stmt->tok.col_end);
-		print_stmt(stmt->next, indent);
-		return;
-	case STMT_SELECT:
-		fputs("if ", stdout);
-		print_expr(stmt->sel.cond, 0);
-		printf(" {\t# %d:%d:%d\n",
-		       stmt->tok.line,
-			       stmt->tok.col,
-			       stmt->tok.col_end);
-		print_stmt(stmt->sel.ifbody, indent + 1);
-		print_indent(indent);
-		if (stmt->sel.elsebody) {
-			fputs("} else {\n", stdout);
-			print_stmt(stmt->sel.elsebody, indent + 1);
-			print_indent(indent);
-		}
-		fputs("}\n", stdout);
-		print_stmt(stmt->next, indent);
-		return;
-	case STMT_LOOP:
-		fputs("while ", stdout);
-		print_expr(stmt->loop.cond, 0);
-		printf(" {\t# %d:%d:%d\n",
-		       stmt->tok.line,
-		       stmt->tok.col,
-		       stmt->tok.col_end);
-		print_stmt(stmt->loop.body, indent + 1);
-		print_indent(indent);
-		fputs("}\n", stdout);
-		print_stmt(stmt->next, indent);
-		return;
-	default:
-		assert(!"unexpected state");
-	}
-}
-
-void
-print_program(AST a)
-{
-	Statement *gdecl, *par;
-	Procedure *proc;
-
-	printf("==> %s <==\n", script_path);
-	if (a.globals)
-		fputs("# globals\n", stdout);
-	for (gdecl = a.globals; gdecl; gdecl = gdecl->next) {
-		if (gdecl->decl.elems) {
-			printf("int %s[", gdecl->tok.name);
-			print_expr(gdecl->decl.elems, 0);
-			fputs("];", stdout);
-		} else if (gdecl->decl.expr) {
-			printf("int %s = ", gdecl->tok.name);
-			print_expr(gdecl->decl.expr, 0);
-			fputs(";", stdout);
-		} else {
-			printf("int %s;", gdecl->tok.name);
-		}
-		printf(" # %d:%d:%d\n",
-		       gdecl->tok.line,
-		       gdecl->tok.col,
-		       gdecl->tok.col_end);
-	}
-	if (a.globals)
-		fputs("\n", stdout);
-	if (a.procs)
-		fputs("# procedures (printed reversed)\n", stdout);
-	for (proc = a.procs; proc; proc = proc->next) {
-		printf("proc %s(", proc->tok.name);
-		if (proc->params) {
-			for (par = proc->params; par->next; par = par->next)
-				printf("%s, ", par->tok.name);
-			fputs(par->tok.name, stdout);
-		}
-		fputs(") {", stdout);
-		printf(" # %d:%d:%d\n",
-		       proc->tok.line,
-		       proc->tok.col,
-		       proc->tok.col_end);
-		print_stmt(proc->body, 1);
-		fputs("}\n", stdout);
-	}
-	printf("==> END %s <==\n", script_path);
-}
-
-Variable *
-get_var(Variable *locs, const char *name)
-{
-	Variable *var;
-
-	for (var = locs; var; var = var->next)
-		if (!strcmp(name, var->tok->name))
-			return var;
-	for (var = globals; var; var = var->next)
-		if (!strcmp(name, var->tok->name))
-			return var;
-	return NULL;
-}
-
-int
-push_word(Token *t, int64_t x)
-{
-	int addr;
-
-	if (words_top >= WORDS_SIZE)
-		eval_die(t, "word stack overflow");
-	addr = words_top++;
-	assert(addr >= 0);
-	assert(addr < WORDS_SIZE);
-	words[addr] = x;
-	return addr;
-}
-
-int
-push_arr(Token *t, int n)
-{
-	int addr;
-
-	if (n < 1)
-		eval_die(t, "array size < 1 (%d)", n);
-	if (words_top + n >= WORDS_SIZE)
-		eval_die(t, "word stack overflow: array is too large (%d)", n);
-	addr = words_top;
-	assert(addr >= 0);
-	assert(addr < WORDS_SIZE);
-	words_top += n;
-	return addr;
-}
-
-uint64_t
-power(uint64_t base, uint64_t exp)
-{
-	uint64_t res = 1;
-
-	while (exp > 0) {
-		if (exp & 1)
-			res *= base;
-		base *= base;
-		exp >>= 1;
-	}
-	return res;
+	va_start(ap, msg);
+	vsprintf(s, msg, ap);
+	va_end(ap);
+	if (t && t->line > 0 && t->col > 0)
+		fprintf(stderr, "%s:%d:%d: ERROR: %s\n", script_path, t->line, t->col, s);
+	else
+		fprintf(stderr, "%s: ERROR: %s\n", script_path, s);
+	if (script_file)
+		fclose(script_file);
+	if (debug)
+		abort();
+	exit(3);
 }
 
 Value
@@ -1615,16 +1602,13 @@ builtin_str_to_int(Variable *locs, Expression *procexpr, Expression *args)
 {
 	Value v = {0};
 	Variable *var = NULL;
-	Statement *par;
+	Statement *params;
 	int i, c;
 	int64_t addr;
 	char buf[TOKEN_BUF_SIZE];
 
-	par = alloc(&eval_alloc, sizeof(Statement));
-	par->tag = STMT_DECL;
-	par->tok.tag = TOK_NAME;
-	par->tok.name = "_bi_digits";
-	var = eval_args(locs, par, procexpr, args);
+	params = make_param("digits", NULL);
+	var = eval_args(locs, params, procexpr, args);
 	/* function */
 	addr = words[var->addr];
 	if (addr <= 0 || addr + TOKEN_BUF_SIZE > WORDS_SIZE)
@@ -1649,7 +1633,7 @@ builtin_put_int(Variable *locs, Expression *procexpr, Expression *args)
 {
 	Value v = {0};
 	Variable *var = NULL;
-	Statement *par;
+	Statement *params;
 	int ret;
 	int64_t no_nl;
 	union typepunning {
@@ -1657,15 +1641,9 @@ builtin_put_int(Variable *locs, Expression *procexpr, Expression *args)
 		int64_t i;
 	} tp;
 
-	par = alloc(&eval_alloc, sizeof(Statement)); /* no newline? */
-	par->tag = STMT_DECL;
-	par->tok.tag = TOK_NAME;
-	par->tok.name = "_bi_no_newline";
-	par->next = alloc(&eval_alloc, sizeof(Statement)); /* int */
-	par->next->tag = STMT_DECL;
-	par->next->tok.tag = TOK_NAME;
-	par->next->tok.name = "_bi_int";
-	var = eval_args(locs, par, procexpr, args);
+	params = make_param("n", NULL);
+	make_param("no_newline", params);
+	var = eval_args(locs, params, procexpr, args);
 	assert(var->next->addr >= 1);
 	assert(var->next->addr < WORDS_SIZE);
 	assert(var->addr >= 1);
@@ -1706,14 +1684,11 @@ builtin_put_char(Variable *locs, Expression *procexpr, Expression *args)
 {
 	Value v = {0};
 	Variable *var = NULL;
-	Statement *par;
+	Statement *params;
 	int c;
 
-	par = alloc(&eval_alloc, sizeof(Statement));
-	par->tag = STMT_DECL;
-	par->tok.tag = TOK_NAME;
-	par->tok.name = "_bi_char";
-	var = eval_args(locs, par, procexpr, args);
+	params = make_param("c", NULL);
+	var = eval_args(locs, params, procexpr, args);
 	/* function */
 	c = fputc((unsigned char)words[var->addr], stdout);
 	v.i = c == EOF ? -1 : c;
@@ -1742,14 +1717,11 @@ builtin_random(Variable *locs, Expression *procexpr, Expression *args)
 
 	Value v = {0};
 	Variable *var = NULL;
-	Statement *par;
+	Statement *params;
 	int64_t seed;
 
-	par = alloc(&eval_alloc, sizeof(Statement));
-	par->tag = STMT_DECL;
-	par->tok.tag = TOK_NAME;
-	par->tok.name = "_bi_seed";
-	var = eval_args(locs, par, procexpr, args);
+	params = make_param("seed", NULL);
+	var = eval_args(locs, params, procexpr, args);
 	/* function */
 	seed = words[var->addr];
 	if (seed <= 0 || seed >= 2147483647) {
@@ -1770,13 +1742,10 @@ builtin_exit(Variable *locs, Expression *procexpr, Expression *args)
 {
 	Value v = {0};
 	Variable *var = NULL;
-	Statement *par;
+	Statement *params;
 
-	par = alloc(&eval_alloc, sizeof(Statement));
-	par->tag = STMT_DECL;
-	par->tok.tag = TOK_NAME;
-	par->tok.name = "_bi_code";
-	var = eval_args(locs, par, procexpr, args);
+	params = make_param("code", NULL);
+	var = eval_args(locs, params, procexpr, args);
 	/* function */
 	exit((unsigned char)(words[var->addr] & 255));
 	return v;
@@ -1787,18 +1756,59 @@ builtin_assert(Variable *locs, Expression *procexpr, Expression *args)
 {
 	Value v = {0};
 	Variable *var = NULL;
-	Statement *par;
+	Statement *params;
 
-	par = alloc(&eval_alloc, sizeof(Statement));
-	par->tag = STMT_DECL;
-	par->tok.tag = TOK_NAME;
-	par->tok.name = "_bi_expression";
-	var = eval_args(locs, par, procexpr, args);
+	params = make_param("expression", NULL);
+	var = eval_args(locs, params, procexpr, args);
 	/* function */
 	if (words[var->addr])
 		return v;
 	eval_die(&procexpr->tok, "assertion failed");
 	return v;
+}
+
+int
+push_word(Token *t, int64_t x)
+{
+	int addr;
+
+	if (words_top >= WORDS_SIZE)
+		eval_die(t, "word stack overflow");
+	addr = words_top++;
+	assert(addr >= 0);
+	assert(addr < WORDS_SIZE);
+	words[addr] = x;
+	return addr;
+}
+
+int
+push_arr(Token *t, int n)
+{
+	int addr;
+
+	if (n < 1)
+		eval_die(t, "array size < 1 (%d)", n);
+	if (words_top + n >= WORDS_SIZE)
+		eval_die(t, "word stack overflow: array is too large (%d)", n);
+	addr = words_top;
+	assert(addr >= 0);
+	assert(addr < WORDS_SIZE);
+	words_top += n;
+	return addr;
+}
+
+Variable *
+get_var(Variable *locs, const char *name)
+{
+	Variable *var;
+
+	for (var = locs; var; var = var->next)
+		if (!strcmp(name, var->tok->name))
+			return var;
+	for (var = globals; var; var = var->next)
+		if (!strcmp(name, var->tok->name))
+			return var;
+	return NULL;
 }
 
 Variable *
@@ -2241,25 +2251,9 @@ eval(int argc, char **argv)
 	words_top = prev_words_top;
 	assert(prev_eval_top == eval_alloc.beg);
 	assert(prev_words_top == 0);
+	for (i = 0; i < WORDS_SIZE; ++i)
+		assert(!words[i]);
 	return v.i & 255;
-}
-
-void
-usage(void)
-{
-	fprintf(stdout,
-		"usage: %s SCRIPT [ARGUMENTS...]\n"
-		"       %s -h           # show this\n"
-		"       %s -v           # show version\n"
-		"       %s -c COMMAND   # evaluate COMMAND\n"
-		"\n"
-		"error format:\n"
-		"<script>:<line>:<column>: ERROR: <message>\n"
-		"\n"
-		"expected entry point:\n"
-		"proc main() {}           # no command-line arguments\n"
-		"proc main(argc, argv) {} # argument count and vector\n",
-		progname, progname, progname, progname);
 }
 
 int
