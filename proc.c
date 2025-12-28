@@ -1777,6 +1777,7 @@ push_word(Token *t, int64_t x)
 	addr = words_top++;
 	assert(addr >= 0);
 	assert(addr < WORDS_SIZE);
+	assert(!words[addr]);
 	words[addr] = x;
 	return addr;
 }
@@ -1784,7 +1785,7 @@ push_word(Token *t, int64_t x)
 int
 push_arr(Token *t, int n)
 {
-	int addr;
+	int addr, i;
 
 	if (n < 1)
 		eval_die(t, "array size < 1 (%d)", n);
@@ -1793,6 +1794,8 @@ push_arr(Token *t, int n)
 	addr = words_top;
 	assert(addr >= 0);
 	assert(addr < WORDS_SIZE);
+	for (i = addr; i < addr + n; ++i)
+		assert(!words[i]);
 	words_top += n;
 	return addr;
 }
@@ -1877,7 +1880,7 @@ eval_call(Variable *locs, Expression *e)
 	v = eval_stmt(eval_args(locs, proc->params, procexpr, e->right), proc->body); DEREF(v);
 cleanup:
 	memset(prev_eval_top, 0, (size_t)(eval_alloc.top - prev_eval_top));
-	memset(words, 0, words_top - prev_words_top);
+	memset(words + prev_words_top, 0, sizeof(words[0]) * (words_top - prev_words_top));
 	eval_alloc.top = prev_eval_top;
 	words_top = prev_words_top;
 	return v;
@@ -2246,12 +2249,12 @@ eval(int argc, char **argv)
 	}
 	/* final cleanup */
 	memset(prev_eval_top, 0, (size_t)(eval_alloc.top - prev_eval_top));
-	memset(words, 0, words_top - prev_words_top);
+	memset(words + prev_words_top, 0, sizeof(words[0]) * (words_top - prev_words_top));
 	eval_alloc.top = prev_eval_top;
 	words_top = prev_words_top;
-	assert(prev_eval_top == eval_alloc.beg);
-	assert(prev_words_top == 0);
-	for (i = 0; i < WORDS_SIZE; ++i)
+	assert(eval_alloc.top == eval_alloc.beg);
+	assert(words_top == 0);
+	for (i = words_top; i < WORDS_SIZE; ++i)
 		assert(!words[i]);
 	return v.i & 255;
 }
