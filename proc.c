@@ -2,8 +2,6 @@
  *
  * XXX: keep in mind this is probably inefficient/broken, this is my first time trying this */
 
-#include <stddef.h>
-#include <limits.h>
 #include <inttypes.h>
 #include <assert.h>
 #include <stdarg.h>
@@ -12,16 +10,16 @@
 #include <stdio.h>
 #include <time.h>
 
-#define VERSION "2025-12-22 -- https://github.com/danielsource/proc"
-#define TOKEN_BUF_SIZE (80) /* 78 meaningful characters at most */
+#define VERSION "2025-12-28 -- https://github.com/danielsource/proc"
 #define PARSE_DATA_SIZE (50*1000*1000)
 #define EVAL_DATA_SIZE (50*1000*1000)
 #define WORDS_SIZE (500*1000)
+#define TOKEN_BUF_SIZE (80) /* 78 meaningful characters at most */
+#define TOKEN_UNDO_SIZE (2)
 #define UNARY_PREC (10)
 #define INT64_OB1 ((uint64_t)INT64_MAX + 1) /* off by one */
 
 #define ROUND_UP(n, to) (((n) + ((to) - 1)) & ~((to) - 1))
-#define LENGTH(x) ((int)(sizeof(x) / sizeof((x)[0])))
 #define DEREF(v) (v.deref = v.deref ? (v.i = words[v.i], 0) : 0) /* lvalue-to-rvalue */
 
 /* assumes ASCII */
@@ -34,11 +32,11 @@
 #define IS_IDENT1(c) (IS_ALPHA(c) || (c) == '_') /* A-Za-z_ */
 #define IS_IDENT2(c) (IS_ALNUM(c) || (c) == '_') /* A-Za-z_0-9 */
 
-struct bumpalloc {
+typedef struct {
 	char *beg, *top, *end;
-};
+} BumpAlloc;
 
-enum tok_tag {
+typedef enum {
 	TOK_NULL = 0,
 	TOK_START,
 	TOK_INT,
@@ -90,30 +88,30 @@ enum tok_tag {
 	TOK_WHILE,
 	TOK_PROC,
 	TOK_PERIOD
-};
+} TokTag;
 
-struct token {
-	enum tok_tag tag;
+typedef struct {
+	TokTag tag;
 	int line, col, col_end;
 	union {
 		int64_t i;
 		const char *name; /* XXX: C strings are a major source of bugs */
-	} u;
-};
+	}; /* using anonymous unions (C11) */
+} Token;
 
-struct ast {
-	struct stmt *globals;
-	struct proc *procs;
-};
+typedef struct {
+	struct Statement *globals;
+	struct Procedure *procs;
+} AST;
 
-struct proc {
-	struct token tok;
-	struct stmt *params;
-	struct stmt *body;
-	struct proc *next;
-};
+typedef struct Procedure {
+	Token tok;
+	struct Statement *params;
+	struct Statement *body;
+	struct Procedure *next;
+} Procedure;
 
-enum expr_tag {
+typedef enum {
 	EXPR_INVALID = 0,
 	EXPR_INT,
 	EXPR_NAME,
@@ -144,34 +142,34 @@ enum expr_tag {
 	EXPR_BIT_OR,
 	EXPR_AND,
 	EXPR_OR
-};
+} ExprTag;
 
-struct expr {
-	enum expr_tag tag;
-	struct token tok;
-	struct expr *left, *right;
-};
+typedef struct Expression {
+	ExprTag tag;
+	Token tok;
+	struct Expression *left, *right;
+} Expression;
 
-struct stmt_decl {
-	struct expr *elems; /* NULL if scalar, otherwise array[elems] */
-	struct expr *expr;
-};
+typedef struct {
+	Expression *elems; /* NULL if scalar, otherwise array[elems] */
+	Expression *expr;
+} StmtDecl;
 
-struct stmt_assign {
-	struct expr *lhs, *rhs;
-};
+typedef struct {
+	Expression *lhs, *rhs;
+} StmtAssign;
 
-struct stmt_select {
-	struct expr *cond;
-	struct stmt *ifbody, *elsebody;
-};
+typedef struct {
+	Expression *cond;
+	struct Statement *ifbody, *elsebody;
+} StmtSelect;
 
-struct stmt_loop {
-	struct expr *cond;
-	struct stmt *body;
-};
+typedef struct {
+	Expression *cond;
+	struct Statement *body;
+} StmtLoop;
 
-enum stmt_tag {
+typedef enum {
 	STMT_INVALID = 0,
 	STMT_RETURN,
 	STMT_DECL,
@@ -179,32 +177,79 @@ enum stmt_tag {
 	STMT_CALL,
 	STMT_SELECT,
 	STMT_LOOP
-};
+} StmtTag;
 
-struct stmt {
-	enum stmt_tag tag;
-	struct token tok;
-	struct stmt *next;
+typedef struct Statement {
+	StmtTag tag;
+	Token tok;
+	struct Statement *next;
 	union {
-		struct expr *expr;
-		struct stmt_decl decl;
-		struct stmt_assign ass;
-		struct stmt_select sel;
-		struct stmt_loop loop;
-	} u;
-};
+		Expression *expr;
+		StmtDecl decl;
+		StmtAssign ass;
+		StmtSelect sel;
+		StmtLoop loop;
+	};
+} Statement;
 
-struct var {
-	struct token *tok;
+typedef struct Variable {
+	Token *tok;
 	int addr;
 	int elems; /* 0 if scalar, otherwise array[elems] */
-	struct var *next;
-};
+	struct Variable *next;
+} Variable;
 
-struct val {
+typedef struct {
 	int64_t i;
 	int deref, ret;
-};
+} Value;
+
+/* function declarations */
+
+static void         debuglog(int ln, const char *msg, ...);
+static BumpAlloc    bumpalloc_new(void *p, int capacity);
+static void *       alloc(BumpAlloc *a, int n);
+static void         parse_die(const char *msg, ...);
+static void         eval_die(Token *t, const char *msg, ...);
+static int64_t      str_to_int(const char *digits);
+static const char * get_token_str(Token t);
+static void         next_token(void);
+static void         undo_token(void);
+static Expression * parse_unary_expr(void);
+static ExprTag      get_binary_expr(TokTag tag, int *prec);
+static Expression * parse_binary_expr(Expression *left, int minprec);
+static Expression * parse_expr(int minprec);
+static Statement *  parse_decl(Statement **decl_list, int depth);
+static void         parse_assign(Statement **stmt_list);
+static Statement *  parse_if(int depth);
+static Statement *  parse_while(int depth);
+static Statement *  parse_stmt(int depth);
+static Statement *  get_decl(Statement *decls, const char *name);
+static Procedure *  get_proc(Procedure *procs, const char *name);
+static void         dummy_main_for_evalcmd(Token first, Expression *e, char *procname);
+static Procedure *  parse_proc(void);
+static void         parse(void);
+static void         print_expr(Expression *e, int depth);
+static void         print_indent(int indent);
+static void         print_stmt(Statement *stmt, int indent);
+static void         print_program(AST a);
+static Variable *   get_var(Variable *locs, const char *name);
+static int          push_word(Token *t, int64_t x);
+static int          push_arr(Token *t, int n);
+static uint64_t     power(uint64_t base, uint64_t exp);
+static Value        builtin_str_to_int(Variable *locs, Expression *procexpr, Expression *args);
+static Value        builtin_put_int(Variable *locs, Expression *procexpr, Expression *args);
+static Value        builtin_put_char(Variable *locs, Expression *procexpr, Expression *args);
+static Value        builtin_get_char(Variable *locs, Expression *procexpr, Expression *args);
+static Value        builtin_random(Variable *locs, Expression *procexpr, Expression *args);
+static Value        builtin_exit(Variable *locs, Expression *procexpr, Expression *args);
+static Value        builtin_assert(Variable *locs, Expression *procexpr, Expression *args);
+static Variable *   eval_args(Variable *locs, Statement *params, Expression *procexpr, Expression *args);
+static Value        eval_call(Variable *locs, Expression *e);
+static Value        eval_expr(Variable *locs, Expression *e, int constex);
+static Value        eval_stmt(Variable *locs, Statement *stmt);
+static int          eval(int argc, char **argv);
+static void         usage(void);
 
 /* globals */
 
@@ -215,29 +260,43 @@ static char *progname, *script_path;
 static FILE *script_file;
 
 static char parse_data[PARSE_DATA_SIZE];
-static struct bumpalloc parse_alloc;
+static BumpAlloc parse_alloc;
 
 static char eval_data[EVAL_DATA_SIZE];
-static struct bumpalloc eval_alloc;
+static BumpAlloc eval_alloc;
 
 static int64_t words[WORDS_SIZE];
 static int words_top;
 
-static struct token tok = {TOK_START};
-static struct token tok_undo[2];
+static Token tok = {TOK_START, 0, 0, 0, {0}};
+static Token tok_undo[TOKEN_UNDO_SIZE];
 static int tok_undo_top = 0;
 
-static struct ast ast;
+static AST ast;
 
-static struct var *globals;
+static Variable *globals;
 
-int compiletime_assert1(int [sizeof(int) >= 4             ?1:-1]);
-int compiletime_assert2(int [sizeof(char) < sizeof(int)   ?1:-1]);
-int compiletime_assert3(int [(int64_t)-1 == ~0            ?1:-1]); /* two's complement */
+static const struct {
+	const char *name;
+	Value (*proc)(Variable *, Expression *, Expression *);
+} builtins[] = {
+	{"StrToInt", builtin_str_to_int},
+	{"PutInt", builtin_put_int},
+	{"PutHex", builtin_put_int},
+	{"PutChar", builtin_put_char},
+	{"GetChar", builtin_get_char},
+	{"Rand", builtin_random},
+	{"Exit", builtin_exit},
+	{"Assert", builtin_assert},
+	{NULL, NULL},
+};
+
+int compiletime_assert1(int [sizeof(int) >= 4   ?1:-1]);
+int compiletime_assert2(int [(int64_t)-1 == ~0  ?1:-1]); /* two's complement */
 
 /* implementation */
 
-static void
+void
 debuglog(int ln, const char *msg, ...)
 {
 	va_list ap;
@@ -251,10 +310,10 @@ debuglog(int ln, const char *msg, ...)
 	fprintf(stderr, __FILE__":%d: DEBUG: %s\n", ln, s);
 }
 
-static struct bumpalloc
+BumpAlloc
 bumpalloc_new(void *p, int capacity)
 {
-	struct bumpalloc a;
+	BumpAlloc a;
 
 	assert(p);
 	assert(capacity >= 1);
@@ -263,8 +322,8 @@ bumpalloc_new(void *p, int capacity)
 	return a;
 }
 
-static void *
-alloc(struct bumpalloc *a, int n)
+void *
+alloc(BumpAlloc *a, int n)
 {
 	char *top, *last;
 
@@ -278,7 +337,7 @@ alloc(struct bumpalloc *a, int n)
 	return last;
 }
 
-static void
+void
 parse_die(const char *msg, ...)
 {
 	va_list ap;
@@ -298,8 +357,8 @@ parse_die(const char *msg, ...)
 	exit(2);
 }
 
-static void
-eval_die(struct token *t, const char *msg, ...)
+void
+eval_die(Token *t, const char *msg, ...)
 {
 	va_list ap;
 	char s[TOKEN_BUF_SIZE * 4];
@@ -318,7 +377,7 @@ eval_die(struct token *t, const char *msg, ...)
 	exit(3);
 }
 
-static int64_t
+int64_t
 str_to_int(const char *digits)
 {
 	uint64_t n = 0, sign = 1, base = 10, digitval;
@@ -373,8 +432,8 @@ invalid_int:
 	return 0;
 }
 
-static const char *
-get_token_str(struct token t)
+const char *
+get_token_str(Token t)
 {
 	char *s;
 
@@ -383,11 +442,11 @@ get_token_str(struct token t)
 	case TOK_INT:
 		if (t.line > 0 && t.col > 0) {
 			s = alloc(&parse_alloc, TOKEN_BUF_SIZE);
-			sprintf(s, "%"PRId64, t.u.i);
+			sprintf(s, "%"PRId64, t.i);
 			return s;
 		}
 		return "<integer>";
-	case TOK_NAME: return t.u.name ? t.u.name : "<name>";
+	case TOK_NAME: return t.name ? t.name : "<name>";
 	case TOK_PAREN_L: return "(";
 	case TOK_PAREN_R: return ")";
 	case TOK_BRACKET_L: return "[";
@@ -443,7 +502,7 @@ get_token_str(struct token t)
 }
 
 /* tokenizer/lexer */
-static void
+void
 next_token(void)
 {
 	int c, i, line, col;
@@ -456,7 +515,7 @@ next_token(void)
 	if (tok_undo_top) {
 		assert(tok_undo[tok_undo_top - 1].tag != TOK_NULL);
 		tok = tok_undo[tok_undo_top - 1];
-		memset(&tok_undo[tok_undo_top - 1], 0, sizeof(struct token));
+		memset(&tok_undo[tok_undo_top - 1], 0, sizeof(Token));
 		--tok_undo_top;
 		return;
 	}
@@ -489,7 +548,7 @@ next_token(void)
 	tok.line = line;
 	tok.col = col;
 	if (IS_DIGIT(c)) {
-		for (i = 0; IS_ALNUM(c) && i < LENGTH(buf) - 1;) {
+		for (i = 0; IS_ALNUM(c) && i < TOKEN_BUF_SIZE - 1;) {
 			buf[i++] = c;
 			if ((c = fgetc(script_file)) == '_') { /* _ separator */
 				++col;
@@ -500,20 +559,20 @@ next_token(void)
 			}
 		}
 		buf[i] = 0;
-		if (i == LENGTH(buf) - 1)
+		if (i == TOKEN_BUF_SIZE - 1)
 invalid_int_lit:
 			parse_die("invalid integer literal: `%s...`", buf);
 		tok.tag = TOK_INT;
-		tok.u.i = str_to_int(buf);
+		tok.i = str_to_int(buf);
 		col += i - 1;
 		goto end;
 	} else if (IS_IDENT1(c)) {
-		for (i = 0; IS_IDENT2(c) && i < LENGTH(buf) - 1; ++i) {
+		for (i = 0; IS_IDENT2(c) && i < TOKEN_BUF_SIZE - 1; ++i) {
 			buf[i] = c;
 			c = fgetc(script_file);
 		}
 		buf[i] = 0;
-		if (i == LENGTH(buf) - 1)
+		if (i == TOKEN_BUF_SIZE - 1)
 			parse_die("invalid name: `%s...`", buf);
 		if (!strcmp(buf, "return")) {
 			tok.tag = TOK_RETURN;
@@ -531,7 +590,7 @@ invalid_int_lit:
 			tok.tag = TOK_NAME;
 			name = alloc(&parse_alloc, i + 1);
 			memcpy(name, buf, i + 1);
-			tok.u.name = name;
+			tok.name = name;
 		}
 		col += i - 1;
 		goto end;
@@ -566,7 +625,7 @@ invalid_char_lit:
 			parse_die("invalid character literal");
 		assert(i != -1);
 		tok.tag = TOK_INT;
-		tok.u.i = i;
+		tok.i = i;
 		col += 2;
 		goto end_consuming;
 	case '(': tok.tag = TOK_PAREN_L; goto end_consuming;
@@ -719,23 +778,21 @@ end_consuming:
 	tok.col_end = col;
 }
 
-static void
+void
 undo_token(void)
 {
 	if (tok.tag == TOK_NULL)
 		return;
-	assert(tok_undo_top < LENGTH(tok_undo));
+	assert(tok_undo_top < TOKEN_UNDO_SIZE);
 	assert(tok_undo[tok_undo_top].tag == TOK_NULL);
 	++tok_undo_top;
 	tok_undo[tok_undo_top - 1] = tok;
 }
 
-static struct expr *parse_expr(int minprec);
-
-static struct expr *
+Expression *
 parse_unary_expr(void)
 {
-	struct expr *e;
+	Expression *e;
 
 	next_token();
 	if (tok.tag == TOK_PAREN_L) {
@@ -745,7 +802,7 @@ parse_unary_expr(void)
 			parse_die("expected `)`, but got `%s`", get_token_str(tok));
 		return e;
 	}
-	e = alloc(&parse_alloc, sizeof(struct expr));
+	e = alloc(&parse_alloc, sizeof(Expression));
 	e->tok = tok;
 	switch (tok.tag) {
 	case TOK_INT:
@@ -767,8 +824,8 @@ parse_unary_expr(void)
 	return e;
 }
 
-static enum expr_tag
-get_binary_expr(enum tok_tag tag, int *prec)
+ExprTag
+get_binary_expr(TokTag tag, int *prec)
 {
 	switch (tag) {
 	case TOK_BRACKET_L:      *prec = 12; return EXPR_ARRIDX;
@@ -797,12 +854,12 @@ get_binary_expr(enum tok_tag tag, int *prec)
 	}
 }
 
-static struct expr *
-parse_binary_expr(struct expr *left, int minprec)
+Expression *
+parse_binary_expr(Expression *left, int minprec)
 {
-	struct expr *e, *right = NULL, **arg;
-	enum expr_tag tag;
-	struct token op;
+	Expression *e, *right = NULL, **arg_list;
+	ExprTag tag;
+	Token op;
 	int prec;
 
 	next_token();
@@ -821,15 +878,15 @@ parse_binary_expr(struct expr *left, int minprec)
 		if (left->tag != EXPR_NAME)
 			parse_die("expected a procedure name, but got `%s` expression",
 				  get_token_str(left->tok));
-		arg = &right;
+		arg_list = &right;
 		next_token();
 		while (tok.tag != TOK_PAREN_R) {
 			undo_token();
-			*arg = alloc(&parse_alloc, sizeof(struct expr));
-			(*arg)->tag = EXPR_ARGS;
-			(*arg)->tok = tok;
-			(*arg)->left = parse_expr(0);
-			arg = &(*arg)->right;
+			*arg_list = alloc(&parse_alloc, sizeof(Expression));
+			(*arg_list)->tag = EXPR_ARGS;
+			(*arg_list)->tok = tok;
+			(*arg_list)->left = parse_expr(0);
+			arg_list = &(*arg_list)->right;
 			next_token();
 			if (tok.tag == TOK_COMMA)
 				next_token();
@@ -841,7 +898,7 @@ parse_binary_expr(struct expr *left, int minprec)
 	} else {
 		right = parse_expr(prec);
 	}
-	e = alloc(&parse_alloc, sizeof(struct expr));
+	e = alloc(&parse_alloc, sizeof(Expression));
 	e->tag = tag;
 	e->tok = op;
 	e->left = left;
@@ -850,10 +907,10 @@ parse_binary_expr(struct expr *left, int minprec)
 }
 
 /* https://www.youtube.com/watch?v=fIPO4G42wYE */
-static struct expr *
+Expression *
 parse_expr(int minprec)
 {
-	struct expr *e, *left;
+	Expression *e, *left;
 
 	left = parse_unary_expr();
 	while (1) {
@@ -864,22 +921,22 @@ parse_expr(int minprec)
 	}
 }
 
-static struct stmt *
-parse_decl(struct stmt **decl, int depth)
+Statement *
+parse_decl(Statement **decl_list, int depth)
 {
 	while (1) {
-		*decl = alloc(&parse_alloc, sizeof(struct stmt));
-		(*decl)->tag = STMT_DECL;
+		*decl_list = alloc(&parse_alloc, sizeof(Statement));
+		(*decl_list)->tag = STMT_DECL;
 		next_token();
 		if (tok.tag != TOK_NAME)
 			parse_die("expected a name, but got `%s`", get_token_str(tok));
-		(*decl)->tok = tok;
+		(*decl_list)->tok = tok;
 		next_token();
 		if (tok.tag == TOK_ASSIGN) {
-			(*decl)->u.decl.expr = parse_expr(0);
+			(*decl_list)->decl.expr = parse_expr(0);
 			next_token();
 		} else if (tok.tag == TOK_BRACKET_L) {
-			(*decl)->u.decl.elems = parse_expr(0);
+			(*decl_list)->decl.elems = parse_expr(0);
 			next_token();
 			if (tok.tag != TOK_BRACKET_R)
 				parse_die("expected `]`, but got `%s`", get_token_str(tok));
@@ -888,72 +945,72 @@ parse_decl(struct stmt **decl, int depth)
 		if (tok.tag == TOK_SEMICOLON) {
 			if (depth)
 				parse_die("declaration is not possible in procedure inner blocks");
-			return *decl; /* return last declaration in the list (int a, ..., z) */
+			return *decl_list; /* return last declaration in the list (int a, ..., z) */
 		} else if (tok.tag != TOK_COMMA) {
 			parse_die("expected `;` or `,`, but got `%s`", get_token_str(tok));
 		}
-		decl = &(*decl)->next;
+		decl_list= &(*decl_list)->next;
 		/* handle next declaration */
 	}
 }
 
-static void
-parse_assign(struct stmt **stmt)
+void
+parse_assign(Statement **stmt_list)
 {
-	(*stmt)->u.ass.lhs = parse_expr(0);
-	(*stmt)->tag = STMT_ASSIGN;
+	(*stmt_list)->ass.lhs = parse_expr(0);
+	(*stmt_list)->tag = STMT_ASSIGN;
 	next_token();
 	if (tok.tag == TOK_ASSIGN) {
-		(*stmt)->u.ass.rhs = parse_expr(0);
+		(*stmt_list)->ass.rhs = parse_expr(0);
 	} else {
-		(*stmt)->u.ass.rhs = alloc(&parse_alloc, sizeof(struct expr));
+		(*stmt_list)->ass.rhs = alloc(&parse_alloc, sizeof(Expression));
 		switch (tok.tag) {
 		case TOK_ASSIGN:
 			break;
 		case TOK_ASSIGN_ADD:
 			tok.tag = TOK_PLUS;
-			(*stmt)->u.ass.rhs->tag = EXPR_ADD;
+			(*stmt_list)->ass.rhs->tag = EXPR_ADD;
 			goto assign_op;
 		case TOK_ASSIGN_SUB:
 			tok.tag = TOK_MINUS;
-			(*stmt)->u.ass.rhs->tag = EXPR_SUB;
+			(*stmt_list)->ass.rhs->tag = EXPR_SUB;
 			goto assign_op;
 		case TOK_ASSIGN_MUL:
 			tok.tag = TOK_ASTERISK;
-			(*stmt)->u.ass.rhs->tag = EXPR_MUL;
+			(*stmt_list)->ass.rhs->tag = EXPR_MUL;
 			goto assign_op;
 		case TOK_ASSIGN_DIV:
 			tok.tag = TOK_SLASH;
-			(*stmt)->u.ass.rhs->tag = EXPR_DIV;
+			(*stmt_list)->ass.rhs->tag = EXPR_DIV;
 			goto assign_op;
 		case TOK_ASSIGN_REM:
 			tok.tag = TOK_PERCENT;
-			(*stmt)->u.ass.rhs->tag = EXPR_REM;
+			(*stmt_list)->ass.rhs->tag = EXPR_REM;
 			goto assign_op;
 		case TOK_ASSIGN_BIT_SH_L:
 			tok.tag = TOK_SHIFT_L;
-			(*stmt)->u.ass.rhs->tag = EXPR_BIT_SH_L;
+			(*stmt_list)->ass.rhs->tag = EXPR_BIT_SH_L;
 			goto assign_op;
 		case TOK_ASSIGN_BIT_SH_R:
 			tok.tag = TOK_SHIFT_R;
-			(*stmt)->u.ass.rhs->tag = EXPR_BIT_SH_R;
+			(*stmt_list)->ass.rhs->tag = EXPR_BIT_SH_R;
 			goto assign_op;
 		case TOK_ASSIGN_BIT_AND:
 			tok.tag = TOK_AMPERSAND;
-			(*stmt)->u.ass.rhs->tag = EXPR_BIT_AND;
+			(*stmt_list)->ass.rhs->tag = EXPR_BIT_AND;
 			goto assign_op;
 		case TOK_ASSIGN_BIT_XOR:
 			tok.tag = TOK_CARET;
-			(*stmt)->u.ass.rhs->tag = EXPR_BIT_XOR;
+			(*stmt_list)->ass.rhs->tag = EXPR_BIT_XOR;
 			goto assign_op;
 		case TOK_ASSIGN_BIT_OR:
 			tok.tag = TOK_PIPE;
-			(*stmt)->u.ass.rhs->tag = EXPR_BIT_OR;
+			(*stmt_list)->ass.rhs->tag = EXPR_BIT_OR;
 			goto assign_op;
 assign_op:
-			(*stmt)->u.ass.rhs->tok = tok;
-			(*stmt)->u.ass.rhs->left = (*stmt)->u.ass.lhs;
-			(*stmt)->u.ass.rhs->right = parse_expr(0);
+			(*stmt_list)->ass.rhs->tok = tok;
+			(*stmt_list)->ass.rhs->left = (*stmt_list)->ass.lhs;
+			(*stmt_list)->ass.rhs->right = parse_expr(0);
 			break;
 		default:
 			parse_die("expected an assignment, but got `%s`", get_token_str(tok));
@@ -964,23 +1021,21 @@ assign_op:
 		parse_die("expected `;`, but got `%s`", get_token_str(tok));
 }
 
-static struct stmt *parse_stmt(int depth);
-
-static struct stmt *
+Statement *
 parse_if(int depth)
 {
-	struct stmt *root = NULL, **sel;
+	Statement *root = NULL, **sel_list;
 
-	sel = &root;
+	sel_list = &root;
 	while (1) {
-		*sel = alloc(&parse_alloc, sizeof(struct stmt));
-		(*sel)->tag = STMT_SELECT;
-		(*sel)->tok = tok;
-		(*sel)->u.sel.cond = parse_expr(0);
+		*sel_list = alloc(&parse_alloc, sizeof(Statement));
+		(*sel_list)->tag = STMT_SELECT;
+		(*sel_list)->tok = tok;
+		(*sel_list)->sel.cond = parse_expr(0);
 		next_token();
 		if (tok.tag != TOK_BRACE_L)
 			parse_die("expected `{`, but got `%s`", get_token_str(tok));
-		(*sel)->u.sel.ifbody = parse_stmt(depth + 1);
+		(*sel_list)->sel.ifbody = parse_stmt(depth + 1);
 		next_token();
 		if (tok.tag != TOK_BRACE_R)
 			parse_die("expected `}`, but got `%s`", get_token_str(tok));
@@ -991,7 +1046,7 @@ parse_if(int depth)
 		}
 		next_token();
 		if (tok.tag == TOK_BRACE_L) {
-			(*sel)->u.sel.elsebody = parse_stmt(depth + 1);
+			(*sel_list)->sel.elsebody = parse_stmt(depth + 1);
 			next_token();
 			if (tok.tag != TOK_BRACE_R)
 				parse_die("expected `}`, but got `%s`", get_token_str(tok));
@@ -999,37 +1054,37 @@ parse_if(int depth)
 		} else if (tok.tag != TOK_IF) {
 			parse_die("expected `{` or `if`, but got `%s`", get_token_str(tok));
 		}
-		sel = &(*sel)->u.sel.elsebody;
+		sel_list = &(*sel_list)->sel.elsebody;
 		/* handle else-if */
 	}
 }
 
-static struct stmt *
+Statement *
 parse_while(int depth)
 {
-	struct stmt *root = NULL;
+	Statement *root = NULL;
 
-	root = alloc(&parse_alloc, sizeof(struct stmt));
+	root = alloc(&parse_alloc, sizeof(Statement));
 	root->tag = STMT_LOOP;
 	root->tok = tok;
-	root->u.loop.cond = parse_expr(0);
+	root->loop.cond = parse_expr(0);
 	next_token();
 	if (tok.tag != TOK_BRACE_L)
 		parse_die("expected `{`, but got `%s`", get_token_str(tok));
-	root->u.loop.body = parse_stmt(depth + 1);
+	root->loop.body = parse_stmt(depth + 1);
 	next_token();
 	if (tok.tag != TOK_BRACE_R)
 		parse_die("expected `}`, but got `%s`", get_token_str(tok));
 	return root;
 }
 
-static struct stmt *
+Statement *
 parse_stmt(int depth)
 {
-	struct stmt *root = NULL, **stmt;
+	Statement *root = NULL, **stmt_list;
 	int unclosedbraces = 0;
 
-	stmt = &root;
+	stmt_list = &root;
 	while (1) {
 		next_token();
 		switch (tok.tag) {
@@ -1037,13 +1092,13 @@ parse_stmt(int depth)
 			undo_token();
 			return root;
 		case TOK_RETURN:
-			*stmt = alloc(&parse_alloc, sizeof(struct stmt));
-			(*stmt)->tag = STMT_RETURN;
-			(*stmt)->tok = tok;
+			*stmt_list = alloc(&parse_alloc, sizeof(Statement));
+			(*stmt_list)->tag = STMT_RETURN;
+			(*stmt_list)->tok = tok;
 			next_token();
 			if (tok.tag != TOK_SEMICOLON) {
 				undo_token();
-				(*stmt)->u.expr = parse_expr(0);
+				(*stmt_list)->expr = parse_expr(0);
 				next_token();
 				if (tok.tag != TOK_SEMICOLON)
 					parse_die("expected `;`, but got `%s`", get_token_str(tok));
@@ -1067,35 +1122,35 @@ parse_stmt(int depth)
 			undo_token();
 			return root;
 		case TOK_INT_KW:
-			stmt = &parse_decl(stmt, depth)->next;
+			stmt_list = &parse_decl(stmt_list, depth)->next;
 			break;
 		case TOK_IF:
-			*stmt = parse_if(depth + 1);
-			stmt = &(*stmt)->next;
+			*stmt_list = parse_if(depth + 1);
+			stmt_list = &(*stmt_list)->next;
 			break;
 		case TOK_WHILE:
-			*stmt = parse_while(depth + 1);
-			stmt = &(*stmt)->next;
+			*stmt_list = parse_while(depth + 1);
+			stmt_list = &(*stmt_list)->next;
 			break;
 		case TOK_NAME: /* assignment or call */
-			*stmt = alloc(&parse_alloc, sizeof(struct stmt));
-			(*stmt)->tok = tok;
+			*stmt_list = alloc(&parse_alloc, sizeof(Statement));
+			(*stmt_list)->tok = tok;
 			next_token();
-			tok_undo[1] = (*stmt)->tok;
+			tok_undo[1] = (*stmt_list)->tok;
 			tok_undo[0] = tok;
 			tok_undo_top = 2;
 			if (tok.tag == TOK_PAREN_L) {
-				(*stmt)->tag = STMT_CALL;
-				(*stmt)->u.expr = parse_expr(0);
-				if ((*stmt)->u.expr->tag != EXPR_CALL)
+				(*stmt_list)->tag = STMT_CALL;
+				(*stmt_list)->expr = parse_expr(0);
+				if ((*stmt_list)->expr->tag != EXPR_CALL)
 					parse_die("expected procedure call statement");
 				next_token();
 				if (tok.tag != TOK_SEMICOLON)
 					parse_die("expected `;`, but got `%s`", get_token_str(tok));
 			} else {
-				parse_assign(stmt);
+				parse_assign(stmt_list);
 			}
-			stmt = &(*stmt)->next;
+			stmt_list = &(*stmt_list)->next;
 			break;
 		default:
 			parse_die("expected `}` or a statement, but got `%s`",
@@ -1105,65 +1160,65 @@ parse_stmt(int depth)
 	}
 }
 
-static struct stmt *
-get_decl(struct stmt *decls, const char *name)
+Statement *
+get_decl(Statement *decls, const char *name)
 {
-	struct stmt *decl;
+	Statement *decl;
 
 	for (decl = decls; decl; decl = decl->next)
-		if (!strcmp(name, decl->tok.u.name))
+		if (!strcmp(name, decl->tok.name))
 			return decl;
 	return NULL;
 }
 
-static struct proc *
-get_proc(struct proc *procs, const char *name)
+Procedure *
+get_proc(Procedure *procs, const char *name)
 {
-	struct proc *proc;
+	Procedure *proc;
 
 	for (proc = procs; proc; proc = proc->next)
-		if (!strcmp(name, proc->tok.u.name))
+		if (!strcmp(name, proc->tok.name))
 			return proc;
 	return NULL;
 }
 
-static void
-dummy_main_for_evalcmd(struct token first, struct expr *e, char *procname)
+void
+dummy_main_for_evalcmd(Token first, Expression *e, char *procname)
 {
 	debuglog(__LINE__, "generate \"proc main(argc,argv){%s(...);}\"", procname);
-	ast.procs = alloc(&parse_alloc, sizeof(struct proc));
+	ast.procs = alloc(&parse_alloc, sizeof(Procedure));
 	ast.procs->tok.tag = TOK_NAME;
-	ast.procs->tok.u.name = "main";
-	ast.procs->params = alloc(&parse_alloc, sizeof(struct stmt));
+	ast.procs->tok.name = "main";
+	ast.procs->params = alloc(&parse_alloc, sizeof(Statement));
 	ast.procs->params->tag = STMT_DECL;
 	ast.procs->params->tok.tag = TOK_NAME;
-	ast.procs->params->tok.u.name = "argc";
-	ast.procs->params->next = alloc(&parse_alloc, sizeof(struct stmt));
+	ast.procs->params->tok.name = "argc";
+	ast.procs->params->next = alloc(&parse_alloc, sizeof(Statement));
 	ast.procs->params->next->tag = STMT_DECL;
 	ast.procs->params->next->tok.tag = TOK_NAME;
-	ast.procs->params->next->tok.u.name = "argv";
-	ast.procs->body = alloc(&parse_alloc, sizeof(struct stmt));
+	ast.procs->params->next->tok.name = "argv";
+	ast.procs->body = alloc(&parse_alloc, sizeof(Statement));
 	ast.procs->body->tag = STMT_CALL;
-	ast.procs->body->u.expr = alloc(&parse_alloc, sizeof(struct expr));
-	ast.procs->body->u.expr->tag = EXPR_CALL;
-	ast.procs->body->u.expr->tok.tag = TOK_PAREN_L;
-	ast.procs->body->u.expr->left = alloc(&parse_alloc, sizeof(struct expr));
-	ast.procs->body->u.expr->left->tag = EXPR_NAME;
-	ast.procs->body->u.expr->left->tok.tag = TOK_NAME;
-	ast.procs->body->u.expr->left->tok.u.name = procname;
-	ast.procs->body->u.expr->right = alloc(&parse_alloc, sizeof(struct expr));
-	ast.procs->body->u.expr->right->tag = EXPR_ARGS;
-	ast.procs->body->u.expr->right->tok = first;
-	ast.procs->body->u.expr->right->left = e;
+	ast.procs->body->expr = alloc(&parse_alloc, sizeof(Expression));
+	ast.procs->body->expr->tag = EXPR_CALL;
+	ast.procs->body->expr->tok.tag = TOK_PAREN_L;
+	ast.procs->body->expr->left = alloc(&parse_alloc, sizeof(Expression));
+	ast.procs->body->expr->left->tag = EXPR_NAME;
+	ast.procs->body->expr->left->tok.tag = TOK_NAME;
+	ast.procs->body->expr->left->tok.name = procname;
+	ast.procs->body->expr->right = alloc(&parse_alloc, sizeof(Expression));
+	ast.procs->body->expr->right->tag = EXPR_ARGS;
+	ast.procs->body->expr->right->tok = first;
+	ast.procs->body->expr->right->left = e;
 }
 
-static struct proc *
+Procedure *
 parse_proc(void)
 {
-	struct proc *proc;
-	struct stmt **par;
+	Procedure *proc;
+	Statement **par_list;
 
-	proc = alloc(&parse_alloc, sizeof(struct proc));
+	proc = alloc(&parse_alloc, sizeof(Procedure));
 	next_token();
 	if (tok.tag != TOK_NAME)
 		parse_die("expected a name, but got `%s`", get_token_str(tok));
@@ -1171,23 +1226,23 @@ parse_proc(void)
 	next_token();
 	if (tok.tag != TOK_PAREN_L)
 		parse_die("expected `(`, but got `%s`", get_token_str(tok));
-	par = &proc->params;
+	par_list = &proc->params;
 	next_token();
 	while (tok.tag != TOK_PAREN_R) {
 		if (tok.tag != TOK_NAME)
 			parse_die("expected `)` or a name, but got `%s`", get_token_str(tok));
-		if (get_decl(proc->params, tok.u.name))
+		if (get_decl(proc->params, tok.name))
 			parse_die("parameter redeclaration: `%s` in procedure `%s`",
-				  tok.u.name, proc->tok.u.name);
-		*par = alloc(&parse_alloc, sizeof(struct stmt));
-		(*par)->tag = STMT_DECL;
-		(*par)->tok = tok;
+				  tok.name, proc->tok.name);
+		*par_list = alloc(&parse_alloc, sizeof(Statement));
+		(*par_list)->tag = STMT_DECL;
+		(*par_list)->tok = tok;
 		next_token();
 		if (tok.tag == TOK_COMMA)
 			next_token();
 		else if (tok.tag != TOK_PAREN_R)
 			parse_die("expected `)` or `,`, but got `%s`", get_token_str(tok));
-		par = &(*par)->next;
+		par_list = &(*par_list)->next;
 	}
 	next_token();
 	if (tok.tag != TOK_BRACE_L)
@@ -1199,28 +1254,28 @@ parse_proc(void)
 	return proc;
 }
 
-static void
+void
 parse(void)
 {
-	struct stmt **decl;
-	struct proc *proc;
-	struct expr *cmdexpr;
-	struct token cmdargtok, conv;
+	Statement **decl_list;
+	Procedure *proc;
+	Expression *cmdexpr;
+	Token cmdargtok, conv;
 
 	memset(&ast, 0, sizeof(ast));
-	decl = &ast.globals;
+	decl_list = &ast.globals;
 	debuglog(__LINE__, "parsing...");
 	while (1) {
 		next_token();
 		switch (tok.tag) {
 		case TOK_INT_KW:
-			decl = &parse_decl(decl, 0)->next;
+			decl_list = &parse_decl(decl_list, 0)->next;
 			break;
 		case TOK_PROC:
 			proc = parse_proc();
-			if (get_proc(ast.procs, proc->tok.u.name))
+			if (get_proc(ast.procs, proc->tok.name))
 				parse_die("procedure redefinition: `%s`",
-					  proc->tok.u.name);
+					  proc->tok.name);
 			if (ast.procs)
 				proc->next = ast.procs;
 			ast.procs = proc;
@@ -1236,8 +1291,8 @@ parse(void)
 				debuglog(__LINE__, "trying to parse expression...done");
 				next_token();
 				conv = tok;
-				if (conv.tag == TOK_NAME && !strcmp(conv.u.name, "to") && (next_token(),1) &&
-				    tok.tag == TOK_NAME && !strcmp(tok.u.name, "hex") && (next_token(),1) &&
+				if (conv.tag == TOK_NAME && !strcmp(conv.name, "to") && (next_token(),1) &&
+				    tok.tag == TOK_NAME && !strcmp(tok.name, "hex") && (next_token(),1) &&
 				    tok.tag == TOK_NULL) {
 					dummy_main_for_evalcmd(cmdargtok, cmdexpr, "PutHex");
 					return;
@@ -1254,10 +1309,10 @@ parse(void)
 	debuglog(__LINE__, "parsing...done");
 }
 
-static void
-print_expr(struct expr *e, int depth)
+void
+print_expr(Expression *e, int depth)
 {
-	struct expr *arg;
+	Expression *arg;
 
 	switch (e->tag) {
 	case EXPR_INT:
@@ -1344,15 +1399,15 @@ print_expr(struct expr *e, int depth)
 	}
 }
 
-static void
+void
 print_indent(int indent)
 {
 	while (indent--)
 		fputs("  ", stdout);
 }
 
-static void
-print_stmt(struct stmt *stmt, int indent)
+void
+print_stmt(Statement *stmt, int indent)
 {
 	if (!stmt)
 		return;
@@ -1360,9 +1415,9 @@ print_stmt(struct stmt *stmt, int indent)
 	switch (stmt->tag) {
 	case STMT_RETURN:
 		fputs("return", stdout);
-		if (stmt->u.expr) {
+		if (stmt->expr) {
 			fputs(" ", stdout);
-			print_expr(stmt->u.expr, 0);
+			print_expr(stmt->expr, 0);
 		}
 		printf(";\t# %d:%d:%d\n",
 		       stmt->tok.line,
@@ -1372,14 +1427,14 @@ print_stmt(struct stmt *stmt, int indent)
 	case STMT_DECL:
 		fputs("int ", stdout);
 		while (1) {
-			fputs(stmt->tok.u.name, stdout);
-			if (stmt->u.decl.elems) {
+			fputs(stmt->tok.name, stdout);
+			if (stmt->decl.elems) {
 				fputs("[", stdout);
-				print_expr(stmt->u.decl.elems, 0);
+				print_expr(stmt->decl.elems, 0);
 				fputs("]", stdout);
-			} else if (stmt->u.decl.expr) {
+			} else if (stmt->decl.expr) {
 				fputs(" = ", stdout);
-				print_expr(stmt->u.decl.expr, 0);
+				print_expr(stmt->decl.expr, 0);
 			}
 			if (!stmt->next || stmt->next->tag != STMT_DECL)
 				break;
@@ -1398,9 +1453,9 @@ print_stmt(struct stmt *stmt, int indent)
 		print_stmt(stmt->next, indent);
 		return;
 	case STMT_ASSIGN:
-		print_expr(stmt->u.ass.lhs, 0);
+		print_expr(stmt->ass.lhs, 0);
 		fputs(" = ", stdout);
-		print_expr(stmt->u.ass.rhs, 0);
+		print_expr(stmt->ass.rhs, 0);
 		printf(";\t# %d:%d:%d\n",
 		       stmt->tok.line,
 		       stmt->tok.col,
@@ -1408,7 +1463,7 @@ print_stmt(struct stmt *stmt, int indent)
 		print_stmt(stmt->next, indent);
 		return;
 	case STMT_CALL:
-		print_expr(stmt->u.expr, 0);
+		print_expr(stmt->expr, 0);
 		printf(";\t# %d:%d:%d\n",
 		       stmt->tok.line,
 		       stmt->tok.col,
@@ -1417,16 +1472,16 @@ print_stmt(struct stmt *stmt, int indent)
 		return;
 	case STMT_SELECT:
 		fputs("if ", stdout);
-		print_expr(stmt->u.sel.cond, 0);
+		print_expr(stmt->sel.cond, 0);
 		printf(" {\t# %d:%d:%d\n",
 		       stmt->tok.line,
-		       stmt->tok.col,
-		       stmt->tok.col_end);
-		print_stmt(stmt->u.sel.ifbody, indent + 1);
+			       stmt->tok.col,
+			       stmt->tok.col_end);
+		print_stmt(stmt->sel.ifbody, indent + 1);
 		print_indent(indent);
-		if (stmt->u.sel.elsebody) {
+		if (stmt->sel.elsebody) {
 			fputs("} else {\n", stdout);
-			print_stmt(stmt->u.sel.elsebody, indent + 1);
+			print_stmt(stmt->sel.elsebody, indent + 1);
 			print_indent(indent);
 		}
 		fputs("}\n", stdout);
@@ -1434,12 +1489,12 @@ print_stmt(struct stmt *stmt, int indent)
 		return;
 	case STMT_LOOP:
 		fputs("while ", stdout);
-		print_expr(stmt->u.loop.cond, 0);
+		print_expr(stmt->loop.cond, 0);
 		printf(" {\t# %d:%d:%d\n",
 		       stmt->tok.line,
 		       stmt->tok.col,
 		       stmt->tok.col_end);
-		print_stmt(stmt->u.loop.body, indent + 1);
+		print_stmt(stmt->loop.body, indent + 1);
 		print_indent(indent);
 		fputs("}\n", stdout);
 		print_stmt(stmt->next, indent);
@@ -1449,26 +1504,26 @@ print_stmt(struct stmt *stmt, int indent)
 	}
 }
 
-static void
-print_program(struct ast a)
+void
+print_program(AST a)
 {
-	struct stmt *gdecl, *par;
-	struct proc *proc;
+	Statement *gdecl, *par;
+	Procedure *proc;
 
 	printf("==> %s <==\n", script_path);
 	if (a.globals)
 		fputs("# globals\n", stdout);
 	for (gdecl = a.globals; gdecl; gdecl = gdecl->next) {
-		if (gdecl->u.decl.elems) {
-			printf("int %s[", gdecl->tok.u.name);
-			print_expr(gdecl->u.decl.elems, 0);
+		if (gdecl->decl.elems) {
+			printf("int %s[", gdecl->tok.name);
+			print_expr(gdecl->decl.elems, 0);
 			fputs("];", stdout);
-		} else if (gdecl->u.decl.expr) {
-			printf("int %s = ", gdecl->tok.u.name);
-			print_expr(gdecl->u.decl.expr, 0);
+		} else if (gdecl->decl.expr) {
+			printf("int %s = ", gdecl->tok.name);
+			print_expr(gdecl->decl.expr, 0);
 			fputs(";", stdout);
 		} else {
-			printf("int %s;", gdecl->tok.u.name);
+			printf("int %s;", gdecl->tok.name);
 		}
 		printf(" # %d:%d:%d\n",
 		       gdecl->tok.line,
@@ -1480,11 +1535,11 @@ print_program(struct ast a)
 	if (a.procs)
 		fputs("# procedures (printed reversed)\n", stdout);
 	for (proc = a.procs; proc; proc = proc->next) {
-		printf("proc %s(", proc->tok.u.name);
+		printf("proc %s(", proc->tok.name);
 		if (proc->params) {
 			for (par = proc->params; par->next; par = par->next)
-				printf("%s, ", par->tok.u.name);
-			fputs(par->tok.u.name, stdout);
+				printf("%s, ", par->tok.name);
+			fputs(par->tok.name, stdout);
 		}
 		fputs(") {", stdout);
 		printf(" # %d:%d:%d\n",
@@ -1497,22 +1552,22 @@ print_program(struct ast a)
 	printf("==> END %s <==\n", script_path);
 }
 
-static struct var *
-get_var(struct var *locs, const char *name)
+Variable *
+get_var(Variable *locs, const char *name)
 {
-	struct var *var;
+	Variable *var;
 
 	for (var = locs; var; var = var->next)
-		if (!strcmp(name, var->tok->u.name))
+		if (!strcmp(name, var->tok->name))
 			return var;
 	for (var = globals; var; var = var->next)
-		if (!strcmp(name, var->tok->u.name))
+		if (!strcmp(name, var->tok->name))
 			return var;
 	return NULL;
 }
 
-static int
-push_word(struct token *t, int64_t x)
+int
+push_word(Token *t, int64_t x)
 {
 	int addr;
 
@@ -1525,8 +1580,8 @@ push_word(struct token *t, int64_t x)
 	return addr;
 }
 
-static int
-push_arr(struct token *t, int n)
+int
+push_arr(Token *t, int n)
 {
 	int addr;
 
@@ -1541,7 +1596,7 @@ push_arr(struct token *t, int n)
 	return addr;
 }
 
-static uint64_t
+uint64_t
 power(uint64_t base, uint64_t exp)
 {
 	uint64_t res = 1;
@@ -1555,50 +1610,46 @@ power(uint64_t base, uint64_t exp)
 	return res;
 }
 
-static struct var *eval_args(struct var *locs, struct stmt *params, struct expr *procexpr, struct expr *args);
-static struct val eval_expr(struct var *locs, struct expr *e, int constex);
-static struct val eval_stmt(struct var *locs, struct stmt *stmt);
-
-static struct val
-builtin_str_to_int(struct var *locs, struct expr *procexpr, struct expr *args)
+Value
+builtin_str_to_int(Variable *locs, Expression *procexpr, Expression *args)
 {
-	struct val v = {0};
-	struct var *var = NULL;
-	struct stmt *par;
+	Value v = {0};
+	Variable *var = NULL;
+	Statement *par;
 	int i, c;
 	int64_t addr;
 	char buf[TOKEN_BUF_SIZE];
 
-	par = alloc(&eval_alloc, sizeof(struct stmt));
+	par = alloc(&eval_alloc, sizeof(Statement));
 	par->tag = STMT_DECL;
 	par->tok.tag = TOK_NAME;
-	par->tok.u.name = "_bi_digits";
+	par->tok.name = "_bi_digits";
 	var = eval_args(locs, par, procexpr, args);
 	/* function */
 	addr = words[var->addr];
-	if (addr <= 0 || addr + LENGTH(buf) > WORDS_SIZE)
+	if (addr <= 0 || addr + TOKEN_BUF_SIZE > WORDS_SIZE)
 		eval_die(&procexpr->tok, "%s: expected a \"string\" argument, like argv[i]",
-			 procexpr->tok.u.name);
+			 procexpr->tok.name);
 	c = (unsigned char)words[addr];
-	for (i = 0; c && i < LENGTH(buf) - 1;) {
+	for (i = 0; c && i < TOKEN_BUF_SIZE - 1;) {
 		buf[i++] = c;
 		c = (unsigned char)words[addr + i];
 	}
 	buf[i] = 0;
-	if (i == LENGTH(buf) - 1)
+	if (i == TOKEN_BUF_SIZE - 1)
 		eval_die(&procexpr->tok, "%s: \"string\" argument is too large: `%s...`",
-			 procexpr->tok.u.name, buf);
+			 procexpr->tok.name, buf);
 	tok = procexpr->tok;
 	v.i = str_to_int(buf);
 	return v;
 }
 
-static struct val
-builtin_put_int(struct var *locs, struct expr *procexpr, struct expr *args)
+Value
+builtin_put_int(Variable *locs, Expression *procexpr, Expression *args)
 {
-	struct val v = {0};
-	struct var *var = NULL;
-	struct stmt *par;
+	Value v = {0};
+	Variable *var = NULL;
+	Statement *par;
 	int ret;
 	int64_t no_nl;
 	union typepunning {
@@ -1606,14 +1657,14 @@ builtin_put_int(struct var *locs, struct expr *procexpr, struct expr *args)
 		int64_t i;
 	} tp;
 
-	par = alloc(&eval_alloc, sizeof(struct stmt)); /* no newline? */
+	par = alloc(&eval_alloc, sizeof(Statement)); /* no newline? */
 	par->tag = STMT_DECL;
 	par->tok.tag = TOK_NAME;
-	par->tok.u.name = "_bi_no_newline";
-	par->next = alloc(&eval_alloc, sizeof(struct stmt)); /* int */
+	par->tok.name = "_bi_no_newline";
+	par->next = alloc(&eval_alloc, sizeof(Statement)); /* int */
 	par->next->tag = STMT_DECL;
 	par->next->tok.tag = TOK_NAME;
-	par->next->tok.u.name = "_bi_int";
+	par->next->tok.name = "_bi_int";
 	var = eval_args(locs, par, procexpr, args);
 	assert(var->next->addr >= 1);
 	assert(var->next->addr < WORDS_SIZE);
@@ -1622,7 +1673,7 @@ builtin_put_int(struct var *locs, struct expr *procexpr, struct expr *args)
 	/* function */
 	tp.i = words[var->next->addr];
 	no_nl = words[var->addr];
-	if (procexpr->tok.u.name[3] == 'H') { /* PutHex() */
+	if (procexpr->tok.name[3] == 'H') { /* PutHex() */
 		if (tp.u <= 0xff)
 			ret = printf("%02"PRIx64"%s", tp.u, no_nl ? "" : "\n");
 		else if (tp.u <= 0xffff)
@@ -1650,18 +1701,18 @@ builtin_put_int(struct var *locs, struct expr *procexpr, struct expr *args)
 	return v;
 }
 
-static struct val
-builtin_put_char(struct var *locs, struct expr *procexpr, struct expr *args)
+Value
+builtin_put_char(Variable *locs, Expression *procexpr, Expression *args)
 {
-	struct val v = {0};
-	struct var *var = NULL;
-	struct stmt *par;
+	Value v = {0};
+	Variable *var = NULL;
+	Statement *par;
 	int c;
 
-	par = alloc(&eval_alloc, sizeof(struct stmt));
+	par = alloc(&eval_alloc, sizeof(Statement));
 	par->tag = STMT_DECL;
 	par->tok.tag = TOK_NAME;
-	par->tok.u.name = "_bi_char";
+	par->tok.name = "_bi_char";
 	var = eval_args(locs, par, procexpr, args);
 	/* function */
 	c = fputc((unsigned char)words[var->addr], stdout);
@@ -1671,10 +1722,10 @@ builtin_put_char(struct var *locs, struct expr *procexpr, struct expr *args)
 	return v;
 }
 
-static struct val
-builtin_get_char(struct var *locs, struct expr *procexpr, struct expr *args)
+Value
+builtin_get_char(Variable *locs, Expression *procexpr, Expression *args)
 {
-	struct val v = {0};
+	Value v = {0};
 	int c;
 
 	eval_args(locs, NULL, procexpr, args);
@@ -1684,20 +1735,20 @@ builtin_get_char(struct var *locs, struct expr *procexpr, struct expr *args)
 	return v;
 }
 
-static struct val
-builtin_random(struct var *locs, struct expr *procexpr, struct expr *args)
+Value
+builtin_random(Variable *locs, Expression *procexpr, Expression *args)
 {
 	static int64_t defstate = 0;
 
-	struct val v = {0};
-	struct var *var = NULL;
-	struct stmt *par;
+	Value v = {0};
+	Variable *var = NULL;
+	Statement *par;
 	int64_t seed;
 
-	par = alloc(&eval_alloc, sizeof(struct stmt));
+	par = alloc(&eval_alloc, sizeof(Statement));
 	par->tag = STMT_DECL;
 	par->tok.tag = TOK_NAME;
-	par->tok.u.name = "_bi_seed";
+	par->tok.name = "_bi_seed";
 	var = eval_args(locs, par, procexpr, args);
 	/* function */
 	seed = words[var->addr];
@@ -1714,34 +1765,34 @@ builtin_random(struct var *locs, struct expr *procexpr, struct expr *args)
 	return v;
 }
 
-static struct val
-builtin_exit(struct var *locs, struct expr *procexpr, struct expr *args)
+Value
+builtin_exit(Variable *locs, Expression *procexpr, Expression *args)
 {
-	struct val v = {0};
-	struct var *var = NULL;
-	struct stmt *par;
+	Value v = {0};
+	Variable *var = NULL;
+	Statement *par;
 
-	par = alloc(&eval_alloc, sizeof(struct stmt));
+	par = alloc(&eval_alloc, sizeof(Statement));
 	par->tag = STMT_DECL;
 	par->tok.tag = TOK_NAME;
-	par->tok.u.name = "_bi_code";
+	par->tok.name = "_bi_code";
 	var = eval_args(locs, par, procexpr, args);
 	/* function */
 	exit((unsigned char)(words[var->addr] & 255));
 	return v;
 }
 
-static struct val
-builtin_assert(struct var *locs, struct expr *procexpr, struct expr *args)
+Value
+builtin_assert(Variable *locs, Expression *procexpr, Expression *args)
 {
-	struct val v = {0};
-	struct var *var = NULL;
-	struct stmt *par;
+	Value v = {0};
+	Variable *var = NULL;
+	Statement *par;
 
-	par = alloc(&eval_alloc, sizeof(struct stmt));
+	par = alloc(&eval_alloc, sizeof(Statement));
 	par->tag = STMT_DECL;
 	par->tok.tag = TOK_NAME;
-	par->tok.u.name = "_bi_expression";
+	par->tok.name = "_bi_expression";
 	var = eval_args(locs, par, procexpr, args);
 	/* function */
 	if (words[var->addr])
@@ -1750,31 +1801,17 @@ builtin_assert(struct var *locs, struct expr *procexpr, struct expr *args)
 	return v;
 }
 
-static const struct {
-	const char *name;
-	struct val (*proc)(struct var *, struct expr *, struct expr *);
-} builtins[] = {
-	{"StrToInt", builtin_str_to_int},
-	{"PutInt", builtin_put_int},
-	{"PutHex", builtin_put_int},
-	{"PutChar", builtin_put_char},
-	{"GetChar", builtin_get_char},
-	{"Rand", builtin_random},
-	{"Exit", builtin_exit},
-	{"Assert", builtin_assert},
-};
-
-static struct var *
-eval_args(struct var *locs, struct stmt *params, struct expr *procexpr, struct expr *args)
+Variable *
+eval_args(Variable *locs, Statement *params, Expression *procexpr, Expression *args)
 {
-	struct val v = {0};
-	struct var *calleelocs = NULL, *var;
-	struct stmt *par;
-	struct expr *arg;
+	Value v = {0};
+	Variable *calleelocs = NULL, *var;
+	Statement *par;
+	Expression *arg;
 	int paramcount = 0;
 
 	for (par = params, arg = args; par; par = par->next) {
-		var = alloc(&eval_alloc, sizeof(struct var));
+		var = alloc(&eval_alloc, sizeof(Variable));
 		var->tok = &par->tok;
 		if (arg) {
 			v = eval_expr(locs, arg->left, 0); DEREF(v);
@@ -1791,16 +1828,16 @@ eval_args(struct var *locs, struct stmt *params, struct expr *procexpr, struct e
 	}
 	if (arg)
 		eval_die(&procexpr->tok, "cannot pass more than %d argument(s) to `%s`",
-			 paramcount, procexpr->tok.u.name);
+			 paramcount, procexpr->tok.name);
 	return calleelocs;
 }
 
-static struct val
-eval_call(struct var *locs, struct expr *e)
+Value
+eval_call(Variable *locs, Expression *e)
 {
-	struct val v = {0};
-	struct proc *proc;
-	struct expr *procexpr;
+	Value v = {0};
+	Procedure *proc;
+	Expression *procexpr;
 	const char *procname;
 	int i;
 	int prev_words_top;
@@ -1810,13 +1847,13 @@ eval_call(struct var *locs, struct expr *e)
 	assert(e->left->tag == EXPR_NAME);
 	assert(!e->right || e->right->tag == EXPR_ARGS);
 	procexpr = e->left;
-	procname = procexpr->tok.u.name;
+	procname = procexpr->tok.name;
 	proc = get_proc(ast.procs, procname);
 	prev_words_top = words_top;
 	prev_eval_top = eval_alloc.top;
 	if (!proc) {
 		/* if procedure wasn't found, check builtins (they start with a upper) */
-		if (IS_UPPER(procname[0])) for (i = 0; i < LENGTH(builtins); ++i) {
+		if (IS_UPPER(procname[0])) for (i = 0; builtins[i].name; ++i) {
 			if (!strcmp(procname, builtins[i].name)) {
 				/* call builtin */
 				v = builtins[i].proc(locs, procexpr, e->right);
@@ -1836,11 +1873,11 @@ cleanup:
 	return v;
 }
 
-static struct val
-eval_expr(struct var *locs, struct expr *e, int constex)
+Value
+eval_expr(Variable *locs, Expression *e, int constex)
 {
-	struct val v = {0}, w = {0};
-	struct var *var;
+	Value v = {0}, w = {0};
+	Variable *var;
 	union typepunning {
 		uint64_t u;
 		int64_t i;
@@ -1848,12 +1885,12 @@ eval_expr(struct var *locs, struct expr *e, int constex)
 
 	switch (e->tag) {
 	case EXPR_INT:
-		v.i = e->tok.u.i;
+		v.i = e->tok.i;
 		break;
 	case EXPR_NAME:
-		var = get_var(locs, e->tok.u.name);
+		var = get_var(locs, e->tok.name);
 		if (!var)
-			eval_die(&e->tok, "variable undefined: `%s`", e->tok.u.name);
+			eval_die(&e->tok, "variable undefined: `%s`", e->tok.name);
 		v.i = var->addr;
 		v.deref = 1;
 		break;
@@ -2035,31 +2072,31 @@ div_by_zero:
 	return v;
 }
 
-static struct val
-eval_stmt(struct var *locs, struct stmt *stmt)
+Value
+eval_stmt(Variable *locs, Statement *stmt)
 {
-	struct val v = {0}, w = {0};
-	struct var *var;
+	Value v = {0}, w = {0};
+	Variable *var;
 
 	while (stmt) {
 		switch (stmt->tag) {
 		case STMT_RETURN:
-			if (stmt->u.expr) {
-				v = eval_expr(locs, stmt->u.expr, 0); DEREF(v);
+			if (stmt->expr) {
+				v = eval_expr(locs, stmt->expr, 0); DEREF(v);
 			} else {
 				memset(&v, 0, sizeof(v));
 			}
 			v.ret = 1; /* flag to return early */
 			return v;
 		case STMT_DECL:
-			var = alloc(&eval_alloc, sizeof(struct var));
+			var = alloc(&eval_alloc, sizeof(Variable));
 			var->tok = &stmt->tok;
-			if (stmt->u.decl.elems) {
-				v = eval_expr(locs, stmt->u.decl.elems, 0); DEREF(v);
+			if (stmt->decl.elems) {
+				v = eval_expr(locs, stmt->decl.elems, 0); DEREF(v);
 				var->addr = push_word(var->tok, push_arr(var->tok, v.i));
 				var->elems = v.i;
-			} else if (stmt->u.decl.expr) {
-				v = eval_expr(locs, stmt->u.decl.expr, 0); DEREF(v);
+			} else if (stmt->decl.expr) {
+				v = eval_expr(locs, stmt->decl.expr, 0); DEREF(v);
 				var->addr = push_word(var->tok, v.i);
 			} else {
 				var->addr = push_word(var->tok, 0);
@@ -2069,8 +2106,8 @@ eval_stmt(struct var *locs, struct stmt *stmt)
 			locs = var;
 			break;
 		case STMT_ASSIGN:
-			v = eval_expr(locs, stmt->u.ass.lhs, 0);
-			w = eval_expr(locs, stmt->u.ass.rhs, 0); DEREF(w);
+			v = eval_expr(locs, stmt->ass.lhs, 0);
+			w = eval_expr(locs, stmt->ass.rhs, 0); DEREF(w);
 			if (!v.deref)
 				eval_die(&stmt->tok, "cannot assign to non-variable");
 			if (!v.i)
@@ -2080,24 +2117,24 @@ eval_stmt(struct var *locs, struct stmt *stmt)
 			words[v.i] = w.i;
 			break;
 		case STMT_CALL:
-			v = eval_expr(locs, stmt->u.expr, 0); DEREF(v);
+			v = eval_expr(locs, stmt->expr, 0); DEREF(v);
 			break;
 		case STMT_SELECT:
-			v = eval_expr(locs, stmt->u.sel.cond, 0); DEREF(v);
+			v = eval_expr(locs, stmt->sel.cond, 0); DEREF(v);
 			if (v.i) {
-				v = eval_stmt(locs, stmt->u.sel.ifbody); DEREF(v);
+				v = eval_stmt(locs, stmt->sel.ifbody); DEREF(v);
 			} else {
-				v = eval_stmt(locs, stmt->u.sel.elsebody); DEREF(v);
+				v = eval_stmt(locs, stmt->sel.elsebody); DEREF(v);
 			}
 			if (v.ret)
 				return v;
 			break;
 		case STMT_LOOP:
 			while (1) {
-				v = eval_expr(locs, stmt->u.loop.cond, 0); DEREF(v);
+				v = eval_expr(locs, stmt->loop.cond, 0); DEREF(v);
 				if (!v.i)
 					break;
-				v = eval_stmt(locs, stmt->u.loop.body); DEREF(v);
+				v = eval_stmt(locs, stmt->loop.body); DEREF(v);
 				if (v.ret)
 					return v;
 			}
@@ -2111,13 +2148,13 @@ eval_stmt(struct var *locs, struct stmt *stmt)
 	return v;
 }
 
-static int
+int
 eval(int argc, char **argv)
 {
-	struct val v = {0};
-	struct var *locs = NULL, *gvar;
-	struct proc *mainproc;
-	struct stmt *gdecl;
+	Value v = {0};
+	Variable *locs = NULL, *gvar;
+	Procedure *mainproc;
+	Statement *gdecl;
 	int i, j, off = 0;
 	int argc_off;
 	int prev_words_top;
@@ -2132,14 +2169,14 @@ eval(int argc, char **argv)
 	prev_words_top = push_word(NULL, 0);
 	/* initialize globals */
 	for (gdecl = ast.globals; gdecl; gdecl = gdecl->next) {
-		gvar = alloc(&eval_alloc, sizeof(struct var));
+		gvar = alloc(&eval_alloc, sizeof(Variable));
 		gvar->tok = &gdecl->tok;
-		if (gdecl->u.decl.elems) {
-			v = eval_expr(NULL, gdecl->u.decl.elems, 1); DEREF(v);
+		if (gdecl->decl.elems) {
+			v = eval_expr(NULL, gdecl->decl.elems, 1); DEREF(v);
 			gvar->addr = push_word(gvar->tok, push_arr(gvar->tok, v.i));
 			gvar->elems = v.i;
-		} else if (gdecl->u.decl.expr) {
-			v = eval_expr(NULL, gdecl->u.decl.expr, 1); DEREF(v);
+		} else if (gdecl->decl.expr) {
+			v = eval_expr(NULL, gdecl->decl.expr, 1); DEREF(v);
 			gvar->addr = push_word(gvar->tok, v.i);
 		} else {
 			gvar->addr = push_word(gvar->tok, 0);
@@ -2167,10 +2204,10 @@ eval(int argc, char **argv)
 				push_word(NULL, argv[i][j]);
 			push_word(NULL, 0);
 		}
-		locs = alloc(&eval_alloc, sizeof(struct var)); /* argc */
+		locs = alloc(&eval_alloc, sizeof(Variable)); /* argc */
 		locs->tok = &mainproc->params->tok;
 		locs->addr = argc_off;
-		locs->next = alloc(&eval_alloc, sizeof(struct var)); /* argv */
+		locs->next = alloc(&eval_alloc, sizeof(Variable)); /* argv */
 		locs->next->tok = &mainproc->params->next->tok;
 		locs->next->addr = argc_off + 1;
 		words[locs->next->addr] = argc_off + 2;
@@ -2207,7 +2244,7 @@ eval(int argc, char **argv)
 	return v.i & 255;
 }
 
-static void
+void
 usage(void)
 {
 	fprintf(stdout,
