@@ -20,7 +20,7 @@ int Q_FIELDS = 10;    # field count
 
 # turing machine (input = {'0', '1'} and blank = '_')
 int tape_size = 16, tape[tape_size];
-int state_count = 1, states[state_count * Q_FIELDS];
+int state_count = 5, states[state_count * Q_FIELDS];
 int state_cur = 0;
 int head = 1;
 
@@ -43,7 +43,6 @@ proc printtape() {
 	int i;
 
 	while i < tape_size {
-		Assert(tape[i] == '0' || tape[i] == '1' || tape[i] == '_');
 		PutChar(tape[i]);
 		i += 1;
 	}
@@ -52,15 +51,6 @@ proc printtape() {
 
 proc curstate(field) {
 	return states[state_cur * Q_FIELDS + field];
-}
-
-proc initstates() {
-	states[0 * Q_FIELDS + Q_IF_0_WRITE]  = '1';
-	states[0 * Q_FIELDS + Q_IF_0_MOVE]   = DIR_RIGHT;
-	states[0 * Q_FIELDS + Q_IF_0_NEXT]   = 0;
-	states[0 * Q_FIELDS + Q_IF_1_WRITE]  = '0';
-	states[0 * Q_FIELDS + Q_IF_1_MOVE]   = DIR_RIGHT;
-	states[0 * Q_FIELDS + Q_IF_1_NEXT]   = 0;
 }
 
 proc execmach() {
@@ -86,15 +76,55 @@ proc execmach() {
 			head += curstate(Q_IF_B_MOVE);
 			state_cur = curstate(Q_IF_B_NEXT);
 		} else {
-			Assert(0);
+			return;
 		}
 	}
+}
+
+proc mach_add_one() {
+	Assert(0 < state_count);
+	states[0 * Q_FIELDS + Q_IF_0_WRITE]  = '0';
+	states[0 * Q_FIELDS + Q_IF_0_MOVE]   = DIR_RIGHT;
+	states[0 * Q_FIELDS + Q_IF_0_NEXT]   = 0;
+	states[0 * Q_FIELDS + Q_IF_1_WRITE]  = '1';
+	states[0 * Q_FIELDS + Q_IF_1_MOVE]   = DIR_RIGHT;
+	states[0 * Q_FIELDS + Q_IF_1_NEXT]   = 0;
+	states[0 * Q_FIELDS + Q_IF_B_WRITE]  = '_';
+	states[0 * Q_FIELDS + Q_IF_B_MOVE]   = DIR_LEFT;
+	states[0 * Q_FIELDS + Q_IF_B_NEXT]   = 1;
+
+	Assert(1 < state_count);
+	states[1 * Q_FIELDS + Q_IF_1_WRITE]  = '0';
+	states[1 * Q_FIELDS + Q_IF_1_MOVE]   = DIR_LEFT;
+	states[1 * Q_FIELDS + Q_IF_1_NEXT]   = 1;
+	states[1 * Q_FIELDS + Q_IF_0_WRITE]  = '1';
+	states[1 * Q_FIELDS + Q_IF_0_MOVE]   = DIR_STAY;
+	states[1 * Q_FIELDS + Q_IF_0_NEXT]   = 2;
+	states[1 * Q_FIELDS + Q_IF_B_WRITE]  = '_';
+	states[1 * Q_FIELDS + Q_IF_B_MOVE]   = DIR_RIGHT;
+	states[1 * Q_FIELDS + Q_IF_B_NEXT]   = 3;
+
+	Assert(2 < state_count);
+	states[2 * Q_FIELDS + Q_FINAL]       = 1;
+
+	Assert(3 < state_count);
+	states[3 * Q_FIELDS + Q_IF_0_WRITE]  = '1';
+	states[3 * Q_FIELDS + Q_IF_0_MOVE]   = DIR_RIGHT;
+	states[3 * Q_FIELDS + Q_IF_0_NEXT]   = 4;
+
+	Assert(4 < state_count);
+	states[4 * Q_FIELDS + Q_IF_0_WRITE]  = '0';
+	states[4 * Q_FIELDS + Q_IF_0_MOVE]   = DIR_RIGHT;
+	states[4 * Q_FIELDS + Q_IF_0_NEXT]   = 4;
+	states[4 * Q_FIELDS + Q_IF_B_WRITE]  = '0';
+	states[4 * Q_FIELDS + Q_IF_B_MOVE]   = DIR_STAY;
+	states[4 * Q_FIELDS + Q_IF_B_NEXT]   = 2;
 }
 
 proc main(argc, argv) {
 	randtape();
 	printtape();
-	initstates();
+	mach_add_one();
 	execmach();
 	printtape();
 	return !curstate(Q_FINAL);
