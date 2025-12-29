@@ -35,7 +35,7 @@
 typedef uint32_t u32; /* unsigned 32-bit integer */
 typedef uint64_t u64; /* unsigned 64-bit integer */
 typedef int64_t i64;  /* signed 64-bit integer */
-typedef int32_t b32;  /* boolean */
+typedef int boolean;
 
 typedef struct {
 	char *beg, *top, *end;
@@ -206,7 +206,7 @@ typedef struct Variable {
 
 typedef struct {
 	i64 i;
-	b32 deref, ret;
+	boolean deref, ret;
 } Value;
 
 /* function declarations */
@@ -265,8 +265,8 @@ static int          eval(u32 argc, char **argv);                   /* evaluate A
 
 /* globals */
 
-static b32 evalcmd = 0;
-static b32 debug = 0;
+static boolean evalcmd = 0;
+static boolean debug = 0;
 
 static char *progname, *script_path;
 static FILE *script_file;
@@ -413,9 +413,9 @@ str_to_int(const char *digits)
 	while (*s) {
 		if (IS_DIGIT(*s))
 			digitval = *s - '0';
-		else if (base == 16 && *s >= 'A' && *s <= 'F') /* A-F */
+		else if (base == 16 && *s >= 'A' && *s <= 'F')
 			digitval = *s - 'A' + 10;
-		else if (base == 16 && *s >= 'a' && *s <= 'f') /* a-f */
+		else if (base == 16 && *s >= 'a' && *s <= 'f')
 			digitval = *s - 'a' + 10;
 		else
 			goto invalid_int;
@@ -1458,6 +1458,7 @@ parse_stmt(u32 depth)
 			*stmt_list = alloc(&parse_alloc, sizeof(Statement));
 			(*stmt_list)->tok = tok;
 			next_token();
+			assert(tok_undo_top == 0);
 			tok_undo[1] = (*stmt_list)->tok;
 			tok_undo[0] = tok;
 			tok_undo_top = 2;
@@ -1639,7 +1640,7 @@ builtin_put_int(Variable *locs, Expression *procexpr, Expression *args)
 		Variable *var;
 	} n_param, no_newline, zero_pad;
 	int ret, pad;
-	b32 no_nl;
+	boolean no_nl;
 	union typepunning {
 		u64 u;
 		i64 i;
@@ -1862,7 +1863,7 @@ eval_call(Variable *locs, Expression *e)
 				goto cleanup;
 			}
 		}
-		eval_die(&procexpr->tok, "procedure undefined: `%s`", procname);
+		eval_die(&procexpr->tok, "procedure undeclared: `%s`", procname);
 		assert(!"unexpected state");
 	}
 	/* call */
@@ -1892,7 +1893,7 @@ eval_expr(Variable *locs, Expression *e, u32 constex)
 	case EXPR_NAME:
 		var = get_var(locs, e->tok.name);
 		if (!var)
-			eval_die(&e->tok, "variable undefined: `%s`", e->tok.name);
+			eval_die(&e->tok, "variable undeclared: `%s`", e->tok.name);
 		v.i = var->addr;
 		v.deref = 1;
 		break;
