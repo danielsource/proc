@@ -10,14 +10,14 @@
 #include <stdio.h>
 #include <time.h>
 
-#define VERSION "2025-12-28 -- https://github.com/danielsource/proc"
+#define VERSION "2025-12-29 -- https://github.com/danielsource/proc"
 #define PARSE_DATA_SIZE (50*1000*1000)
 #define EVAL_DATA_SIZE (50*1000*1000)
 #define WORDS_SIZE (500*1000)
 #define TOKEN_BUF_SIZE (80) /* 78 meaningful characters at most */
 #define TOKEN_UNDO_SIZE (2)
 #define UNARY_PREC (10)
-#define INT64_OB1 ((uint64_t)INT64_MAX + 1) /* off by one */
+#define INT64_OB1 ((u64)INT64_MAX + 1) /* off by one */
 
 #define ROUND_UP(n, to) (((n) + ((to) - 1)) & ~((to) - 1))
 #define DEREF(v) (v.deref = v.deref ? (v.i = words[v.i], 0) : 0) /* lvalue-to-rvalue */
@@ -31,6 +31,11 @@
 #define IS_ALNUM(c) (IS_DIGIT(c) || IS_ALPHA(c))
 #define IS_IDENT1(c) (IS_ALPHA(c) || (c) == '_') /* A-Za-z_ */
 #define IS_IDENT2(c) (IS_ALNUM(c) || (c) == '_') /* A-Za-z_0-9 */
+
+typedef uint32_t u32; /* unsigned 32-bit integer */
+typedef uint64_t u64; /* unsigned 64-bit integer */
+typedef int64_t i64;  /* signed 64-bit integer */
+typedef int32_t b32;  /* boolean */
 
 typedef struct {
 	char *beg, *top, *end;
@@ -92,9 +97,9 @@ typedef enum {
 
 typedef struct {
 	TokTag tag;
-	int line, col, col_end;
+	u32 line, col, col_end;
 	union {
-		int64_t i;
+		i64 i;
 		const char *name; /* XXX: C strings are a major source of bugs */
 	}; /* using anonymous unions (C11) */
 } Token;
@@ -194,48 +199,48 @@ typedef struct Statement {
 
 typedef struct Variable {
 	Token *tok;
-	int addr;
-	int elems; /* 0 if scalar, otherwise array[elems] */
+	u32 addr;
+	u32 elems; /* 0 if scalar, otherwise array[elems] */
 	struct Variable *next;
 } Variable;
 
 typedef struct {
-	int64_t i;
-	int deref, ret;
+	i64 i;
+	b32 deref, ret;
 } Value;
 
 /* function declarations */
 
 /* utilities */
 static void         usage(void);
-static void         debuglog(int ln, const char *msg, ...);        /* print debug messages */
-static BumpAlloc    bumpalloc_new(void *p, int capacity);          /* create new bump/arena allocator */
-static void *       alloc(BumpAlloc *a, int n);                    /* allocate in allocator */
-static uint64_t     power(uint64_t base, uint64_t exp);            /* exponentiation with positives */
-static int64_t      str_to_int(const char *digits);                /* string to int64_t */
+static void         debuglog(u32 ln, const char *msg, ...);        /* print debug messages */
+static BumpAlloc    bumpalloc_new(void *p, u32 capacity);          /* create new bump/arena allocator */
+static void *       alloc(BumpAlloc *a, u32 n);                    /* allocate in allocator */
+static u64          power(u64 base, u64 exp);                      /* exponentiation with positives */
+static i64          str_to_int(const char *digits);                /* string to int64_t */
 static Procedure *  get_proc(Procedure *procs, const char *name);  /* get procedure by name */
 static Statement *  get_decl(Statement *decls, const char *name);  /* get parameter by name */
 static const char * get_token_str(Token t);                        /* get token string representation */
 static Statement *  make_param(const char *name, Statement *last); /* allocate new parameter */
 static void         dummy_main_for_evalcmd(Token first, Expression *e, char *procname);
-static void         print_expr(Expression *e, int depth);
-static void         print_indent(int indent);
-static void         print_stmt(Statement *stmt, int indent);
+static void         print_expr(Expression *e, u32 depth);
+static void         print_indent(u32 indent);
+static void         print_stmt(Statement *stmt, u32 indent);
 static void         print_program(Ast a);                          /* print AST */
 
 /* parsing */
 static void         parse_die(const char *msg, ...);               /* "syntax" error */
 static void         next_token(void);                              /* tokenize on demand; save token in `tok` */
 static void         undo_token(void);                              /* save `tok` for a later `next_token` */
-static ExprTag      get_binary_expr(TokTag tag, int *prec);        /* get expression and precedence by `tag` */
+static ExprTag      get_binary_expr(TokTag tag, u32 *prec);        /* get expression and precedence by `tag` */
 static Expression * parse_unary_expr(void);                        /* leaf node in "pratt" parser */
-static Expression * parse_binary_expr(Expression *left, int minprec); /* inner node "pratt" parser */
-static Expression * parse_expr(int minprec);                       /* "pratt" parser; https://youtu.be/fIPO4G42wYE */
-static Statement *  parse_decl(Statement **decl_list, int depth);  /* parse declaration list */
+static Expression * parse_binary_expr(Expression *left, u32 lastprec); /* inner node "pratt" parser */
+static Expression * parse_expr(u32 lastprec);                       /* "pratt" parser; https://youtu.be/fIPO4G42wYE */
+static Statement *  parse_decl(Statement **decl_list, u32 depth);  /* parse declaration list */
 static void         parse_assign(Statement **stmt_list);           /* parse assignment */
-static Statement *  parse_if(int depth);                           /* parse if expr {...} */
-static Statement *  parse_while(int depth);                        /* parse while expr {...} */
-static Statement *  parse_stmt(int depth);                         /* parse statement */
+static Statement *  parse_if(u32 depth);                           /* parse if expr {...} */
+static Statement *  parse_while(u32 depth);                        /* parse while expr {...} */
+static Statement *  parse_stmt(u32 depth);                         /* parse statement */
 static Procedure *  parse_proc(void);                              /* parse procedure */
 static void         parse(void);                                   /* parse AST */
 
@@ -248,20 +253,20 @@ static Value        builtin_get_char(Variable *locs, Expression *procexpr, Expre
 static Value        builtin_random(Variable *locs, Expression *procexpr, Expression *args);
 static Value        builtin_exit(Variable *locs, Expression *procexpr, Expression *args);
 static Value        builtin_assert(Variable *locs, Expression *procexpr, Expression *args);
-static int          push_word(Token *t, int64_t x);                /* allocate word in `words` */
-static int          push_arr(Token *t, int n);                     /* allocate `n` words in `words` */
+static u32          push_word(Token *t, i64 x);                    /* allocate word in `words` */
+static u32          push_arr(Token *t, i64 n);                     /* allocate `n` words in `words` */
 static Variable *   get_var(Variable *locs, const char *name);     /* get local/global variable by name */
 static Variable *   eval_args(Variable *locs, Statement *params,   /* evaluate procedure call arguments */
                               Expression *procexpr, Expression *args);
 static Value        eval_call(Variable *locs, Expression *e);      /* evaluate procedure call */
-static Value        eval_expr(Variable *locs, Expression *e, int constex); /* evaluate expression */
+static Value        eval_expr(Variable *locs, Expression *e, u32 constex); /* evaluate expression */
 static Value        eval_stmt(Variable *locs, Statement *stmt);    /* evaluate statement */
-static int          eval(int argc, char **argv);                   /* evaluate AST */
+static int          eval(u32 argc, char **argv);                   /* evaluate AST */
 
 /* globals */
 
-static int evalcmd = 0;
-static int debug = 0;
+static b32 evalcmd = 0;
+static b32 debug = 0;
 
 static char *progname, *script_path;
 static FILE *script_file;
@@ -272,12 +277,12 @@ static BumpAlloc parse_alloc;
 static char eval_data[EVAL_DATA_SIZE];
 static BumpAlloc eval_alloc;
 
-static int64_t words[WORDS_SIZE];
-static int words_top;
+static i64 words[WORDS_SIZE];
+static u32 words_top;
 
 static Token tok = {TOK_START, 0, 0, 0, {0}};
 static Token tok_undo[TOKEN_UNDO_SIZE];
-static int tok_undo_top = 0;
+static u32 tok_undo_top = 0;
 
 static Ast ast;
 
@@ -298,14 +303,13 @@ static const struct {
 	{NULL, NULL},
 };
 
-int compiletime_assert1(int [sizeof(int) >= 4   ?1:-1]);
-int compiletime_assert2(int [(int64_t)-1 == ~0  ?1:-1]); /* two's complement */
-
 /* implementation */
 
 void
 usage(void)
 {
+	if (!progname || !strlen(progname))
+		progname = "prog";
 	fprintf(stdout,
 		"usage: %s SCRIPT [ARGUMENTS...]\n"
 		"       %s -h           # show this\n"
@@ -322,7 +326,7 @@ usage(void)
 }
 
 void
-debuglog(int ln, const char *msg, ...)
+debuglog(u32 ln, const char *msg, ...)
 {
 	va_list ap;
 	char s[TOKEN_BUF_SIZE * 4];
@@ -332,11 +336,11 @@ debuglog(int ln, const char *msg, ...)
 	va_start(ap, msg);
 	vsprintf(s, msg, ap);
 	va_end(ap);
-	fprintf(stderr, __FILE__":%d: DEBUG: %s\n", ln, s);
+	fprintf(stderr, __FILE__":%"PRIu32": DEBUG: %s\n", ln, s);
 }
 
 BumpAlloc
-bumpalloc_new(void *p, int capacity)
+bumpalloc_new(void *p, u32 capacity)
 {
 	BumpAlloc a;
 
@@ -348,7 +352,7 @@ bumpalloc_new(void *p, int capacity)
 }
 
 void *
-alloc(BumpAlloc *a, int n)
+alloc(BumpAlloc *a, u32 n)
 {
 	char *top, *last;
 
@@ -362,10 +366,10 @@ alloc(BumpAlloc *a, int n)
 	return last;
 }
 
-uint64_t
-power(uint64_t base, uint64_t exp)
+u64
+power(u64 base, u64 exp)
 {
-	uint64_t res = 1;
+	u64 res = 1;
 
 	while (exp > 0) {
 		if (exp & 1)
@@ -376,10 +380,11 @@ power(uint64_t base, uint64_t exp)
 	return res;
 }
 
-int64_t
+i64
 str_to_int(const char *digits)
 {
-	uint64_t n = 0, sign = 1, base = 10, digitval;
+	i64 sign = 1;
+	u64 n = 0, base = 10, digitval;
 	const char *s;
 
 	s = digits;
@@ -425,7 +430,7 @@ str_to_int(const char *digits)
 		++s;
 	}
 	assert(n <= INT64_OB1);
-	return n == INT64_OB1 ? INT64_MIN : (int64_t)n * sign;
+	return n == INT64_OB1 ? INT64_MIN : (i64)n * sign;
 invalid_int:
 	parse_die("invalid integer: `%s`", digits);
 	return 0;
@@ -461,7 +466,7 @@ get_token_str(Token t)
 	switch (t.tag) {
 	case TOK_NULL: return "end-of-file";
 	case TOK_INT:
-		if (t.line > 0 && t.col > 0) {
+		if (t.line && t.col) {
 			s = alloc(&parse_alloc, TOKEN_BUF_SIZE);
 			sprintf(s, "%"PRId64, t.i);
 			return s;
@@ -527,7 +532,7 @@ make_param(const char *name, Statement *last)
 {
 	Statement *par;
 
-	par = alloc(&eval_alloc, sizeof(Statement));
+	par = alloc(&parse_alloc, sizeof(Statement));
 	par->tag = STMT_DECL;
 	par->tok.tag = TOK_NAME;
 	par->tok.name = name;
@@ -560,7 +565,7 @@ dummy_main_for_evalcmd(Token first, Expression *e, char *procname)
 }
 
 void
-print_expr(Expression *e, int depth)
+print_expr(Expression *e, u32 depth)
 {
 	Expression *arg;
 
@@ -650,14 +655,14 @@ print_expr(Expression *e, int depth)
 }
 
 void
-print_indent(int indent)
+print_indent(u32 indent)
 {
 	while (indent--)
 		fputs("  ", stdout);
 }
 
 void
-print_stmt(Statement *stmt, int indent)
+print_stmt(Statement *stmt, u32 indent)
 {
 	if (!stmt)
 		return;
@@ -669,7 +674,7 @@ print_stmt(Statement *stmt, int indent)
 			fputs(" ", stdout);
 			print_expr(stmt->expr, 0);
 		}
-		printf(";\t# %d:%d:%d\n",
+		printf(";\t# %"PRIu32":%"PRIu32":%"PRIu32"\n",
 		       stmt->tok.line,
 		       stmt->tok.col,
 		       stmt->tok.col_end);
@@ -688,7 +693,7 @@ print_stmt(Statement *stmt, int indent)
 			}
 			if (!stmt->next || stmt->next->tag != STMT_DECL)
 				break;
-			printf(",\t# %d:%d:%d\n",
+			printf(",\t# %"PRIu32":%"PRIu32":%"PRIu32"\n",
 			       stmt->tok.line,
 			       stmt->tok.col,
 			       stmt->tok.col_end);
@@ -696,7 +701,7 @@ print_stmt(Statement *stmt, int indent)
 			fputs("    ", stdout);
 			stmt = stmt->next;
 		}
-		printf(";\t# %d:%d:%d\n",
+		printf(";\t# %"PRIu32":%"PRIu32":%"PRIu32"\n",
 		       stmt->tok.line,
 		       stmt->tok.col,
 		       stmt->tok.col_end);
@@ -706,7 +711,7 @@ print_stmt(Statement *stmt, int indent)
 		print_expr(stmt->ass.lhs, 0);
 		fputs(" = ", stdout);
 		print_expr(stmt->ass.rhs, 0);
-		printf(";\t# %d:%d:%d\n",
+		printf(";\t# %"PRIu32":%"PRIu32":%"PRIu32"\n",
 		       stmt->tok.line,
 		       stmt->tok.col,
 		       stmt->tok.col_end);
@@ -714,7 +719,7 @@ print_stmt(Statement *stmt, int indent)
 		return;
 	case STMT_CALL:
 		print_expr(stmt->expr, 0);
-		printf(";\t# %d:%d:%d\n",
+		printf(";\t# %"PRIu32":%"PRIu32":%"PRIu32"\n",
 		       stmt->tok.line,
 		       stmt->tok.col,
 		       stmt->tok.col_end);
@@ -723,7 +728,7 @@ print_stmt(Statement *stmt, int indent)
 	case STMT_SELECT:
 		fputs("if ", stdout);
 		print_expr(stmt->sel.cond, 0);
-		printf(" {\t# %d:%d:%d\n",
+		printf(" {\t# %"PRIu32":%"PRIu32":%"PRIu32"\n",
 		       stmt->tok.line,
 			       stmt->tok.col,
 			       stmt->tok.col_end);
@@ -740,7 +745,7 @@ print_stmt(Statement *stmt, int indent)
 	case STMT_LOOP:
 		fputs("while ", stdout);
 		print_expr(stmt->loop.cond, 0);
-		printf(" {\t# %d:%d:%d\n",
+		printf(" {\t# %"PRIu32":%"PRIu32":%"PRIu32"\n",
 		       stmt->tok.line,
 		       stmt->tok.col,
 		       stmt->tok.col_end);
@@ -775,7 +780,7 @@ print_program(Ast a)
 		} else {
 			printf("int %s;", gdecl->tok.name);
 		}
-		printf(" # %d:%d:%d\n",
+		printf(" # %"PRIu32":%"PRIu32":%"PRIu32"\n",
 		       gdecl->tok.line,
 		       gdecl->tok.col,
 		       gdecl->tok.col_end);
@@ -792,7 +797,7 @@ print_program(Ast a)
 			fputs(par->tok.name, stdout);
 		}
 		fputs(") {", stdout);
-		printf(" # %d:%d:%d\n",
+		printf(" # %"PRIu32":%"PRIu32":%"PRIu32"\n",
 		       proc->tok.line,
 		       proc->tok.col,
 		       proc->tok.col_end);
@@ -811,8 +816,8 @@ parse_die(const char *msg, ...)
 	va_start(ap, msg);
 	vsprintf(s, msg, ap);
 	va_end(ap);
-	if (tok.line > 0 && tok.col > 0)
-		fprintf(stderr, "%s:%d:%d: ERROR: %s\n", script_path, tok.line, tok.col, s);
+	if (tok.line && tok.col)
+		fprintf(stderr, "%s:%"PRIu32":%"PRIu32": ERROR: %s\n", script_path, tok.line, tok.col, s);
 	else
 		fprintf(stderr, "%s: ERROR: %s\n", script_path, s);
 	if (script_file)
@@ -826,7 +831,8 @@ parse_die(const char *msg, ...)
 void
 next_token(void)
 {
-	int c, i, line, col;
+	int c;
+	u32 i, line, col;
 	char buf[TOKEN_BUF_SIZE], *name;
 
 	if (ferror(script_file))
@@ -918,7 +924,7 @@ invalid_int_lit:
 	}
 	switch (c) {
 	case '\'': /* 'c' character literal */
-		i = -1;
+		i = 0;
 		c = fgetc(script_file);
 		if (c == '\\') { /* \<escape> */
 			c = fgetc(script_file);
@@ -944,7 +950,7 @@ invalid_int_lit:
 		if (c != '\'')
 invalid_char_lit:
 			parse_die("invalid character literal");
-		assert(i != -1);
+		assert(i);
 		tok.tag = TOK_INT;
 		tok.i = i;
 		col += 2;
@@ -1111,7 +1117,7 @@ undo_token(void)
 }
 
 ExprTag
-get_binary_expr(TokTag tag, int *prec)
+get_binary_expr(TokTag tag, u32 *prec)
 {
 	switch (tag) {
 	case TOK_BRACKET_L:      *prec = 12; return EXPR_ARRIDX;
@@ -1176,16 +1182,16 @@ parse_unary_expr(void)
 }
 
 Expression *
-parse_binary_expr(Expression *left, int minprec)
+parse_binary_expr(Expression *left, u32 lastprec)
 {
 	Expression *e, *right = NULL, **arg_list;
 	ExprTag tag;
 	Token op;
-	int prec;
+	u32 prec;
 
 	next_token();
 	tag = get_binary_expr(tok.tag, &prec);
-	if (tag == EXPR_INVALID || prec <= minprec) {
+	if (tag == EXPR_INVALID || prec <= lastprec) {
 		undo_token();
 		return left;
 	}
@@ -1228,13 +1234,13 @@ parse_binary_expr(Expression *left, int minprec)
 }
 
 Expression *
-parse_expr(int minprec)
+parse_expr(u32 lastprec)
 {
 	Expression *e, *left;
 
 	left = parse_unary_expr();
 	while (1) {
-		e = parse_binary_expr(left, minprec);
+		e = parse_binary_expr(left, lastprec);
 		if (e == left)
 			return e;
 		left = e;
@@ -1242,7 +1248,7 @@ parse_expr(int minprec)
 }
 
 Statement *
-parse_decl(Statement **decl_list, int depth)
+parse_decl(Statement **decl_list, u32 depth)
 {
 	while (1) {
 		*decl_list = alloc(&parse_alloc, sizeof(Statement));
@@ -1269,7 +1275,7 @@ parse_decl(Statement **decl_list, int depth)
 		} else if (tok.tag != TOK_COMMA) {
 			parse_die("expected `;` or `,`, but got `%s`", get_token_str(tok));
 		}
-		decl_list= &(*decl_list)->next;
+		decl_list = &(*decl_list)->next;
 		/* handle next declaration */
 	}
 }
@@ -1342,7 +1348,7 @@ assign_op:
 }
 
 Statement *
-parse_if(int depth)
+parse_if(u32 depth)
 {
 	Statement *root = NULL, **sel_list;
 
@@ -1380,7 +1386,7 @@ parse_if(int depth)
 }
 
 Statement *
-parse_while(int depth)
+parse_while(u32 depth)
 {
 	Statement *root = NULL;
 
@@ -1399,10 +1405,10 @@ parse_while(int depth)
 }
 
 Statement *
-parse_stmt(int depth)
+parse_stmt(u32 depth)
 {
 	Statement *root = NULL, **stmt_list;
-	int unclosedbraces = 0;
+	u32 unclosedbraces = 0;
 
 	stmt_list = &root;
 	while (1) {
@@ -1426,12 +1432,8 @@ parse_stmt(int depth)
 			/* ignore code after return: */
 			while (tok.tag != TOK_BRACE_R || unclosedbraces) {
 				switch (tok.tag) {
-				case TOK_BRACE_L:
-					++unclosedbraces;
-					break;
-				case TOK_BRACE_R:
-					--unclosedbraces;
-					break;
+				case TOK_BRACE_L: ++unclosedbraces; break;
+				case TOK_BRACE_R: --unclosedbraces; break;
 				case TOK_NULL:
 					parse_die("missing `}` after `return` statement");
 				default:
@@ -1586,8 +1588,8 @@ eval_die(Token *t, const char *msg, ...)
 	va_start(ap, msg);
 	vsprintf(s, msg, ap);
 	va_end(ap);
-	if (t && t->line > 0 && t->col > 0)
-		fprintf(stderr, "%s:%d:%d: ERROR: %s\n", script_path, t->line, t->col, s);
+	if (t && t->line && t->col)
+		fprintf(stderr, "%s:%"PRIu32":%"PRIu32": ERROR: %s\n", script_path, t->line, t->col, s);
 	else
 		fprintf(stderr, "%s: ERROR: %s\n", script_path, s);
 	if (script_file)
@@ -1603,8 +1605,8 @@ builtin_str_to_int(Variable *locs, Expression *procexpr, Expression *args)
 	Value v = {0};
 	Variable *var = NULL;
 	Statement *params;
-	int i, c;
-	int64_t addr;
+	u32 i, c;
+	i64 addr;
 	char buf[TOKEN_BUF_SIZE];
 
 	params = make_param("digits", NULL);
@@ -1632,47 +1634,36 @@ Value
 builtin_put_int(Variable *locs, Expression *procexpr, Expression *args)
 {
 	Value v = {0};
-	Variable *var = NULL;
-	Statement *params;
-	int ret;
-	int64_t no_nl;
+	union {
+		Statement *stmt;
+		Variable *var;
+	} n_param, no_newline, zero_pad;
+	int ret, pad;
+	b32 no_nl;
 	union typepunning {
-		uint64_t u;
-		int64_t i;
+		u64 u;
+		i64 i;
 	} tp;
 
-	params = make_param("n", NULL);
-	make_param("no_newline", params);
-	var = eval_args(locs, params, procexpr, args);
-	assert(var->next->addr >= 1);
-	assert(var->next->addr < WORDS_SIZE);
-	assert(var->addr >= 1);
-	assert(var->addr < WORDS_SIZE);
+	n_param.stmt    = make_param("n", NULL);
+	no_newline.stmt = make_param("no_newline", n_param.stmt);
+	zero_pad.stmt   = make_param("zero_pad", no_newline.stmt);
+	zero_pad.var   = eval_args(locs, n_param.stmt, procexpr, args);
+	no_newline.var = zero_pad.var->next;
+	n_param.var    = no_newline.var->next;
 	/* function */
-	tp.i = words[var->next->addr];
-	no_nl = words[var->addr];
-	if (procexpr->tok.name[3] == 'H') { /* PutHex() */
-		if (tp.u <= 0xff)
-			ret = printf("%02"PRIx64"%s", tp.u, no_nl ? "" : "\n");
-		else if (tp.u <= 0xffff)
-			ret = printf("%04"PRIx64"%s", tp.u, no_nl ? "" : "\n");
-		else if (tp.u <= 0xffffff)
-			ret = printf("%06"PRIx64"%s", tp.u, no_nl ? "" : "\n");
-		else if (tp.u <= 0xffffffff)
-			ret = printf("%08"PRIx64"%s", tp.u, no_nl ? "" : "\n");
-		else if (tp.u <= 0xffffffffff)
-			ret = printf("%010"PRIx64"%s", tp.u, no_nl ? "" : "\n");
-		else if (tp.u <= 0xffffffffffff)
-			ret = printf("%012"PRIx64"%s", tp.u, no_nl ? "" : "\n");
-		else if (tp.u <= 0xffffffffffffff)
-			ret = printf("%014"PRIx64"%s", tp.u, no_nl ? "" : "\n");
-		else if (tp.u <= 0xffffffffffffffff)
-			ret = printf("%016"PRIx64"%s", tp.u, no_nl ? "" : "\n");
-		else
-			assert(!"unexpected state");
-	} else {
-		ret = printf("%"PRId64"%s", tp.i, no_nl ? "" : "\n");
-	}
+	tp.i  = words[n_param.var->addr];
+	no_nl = words[no_newline.var->addr] & 1;
+	if (words[zero_pad.var->addr] > 80)
+		pad = 80;
+	else if (words[zero_pad.var->addr] < -80)
+		pad = -80;
+	else
+		pad = words[zero_pad.var->addr];
+	if (procexpr->tok.name[3] == 'H') /* PutHex() */
+		ret = printf("%0*"PRIx64"%s", pad, tp.u, no_nl ? "" : "\n");
+	else
+		ret = printf("%0*"PRId64"%s", pad, tp.i, no_nl ? "" : "\n");
 	v.i = ret >= 1 ? ret : -1;
 	if (fflush(stdout) == EOF)
 		v.i = -1;
@@ -1713,12 +1704,12 @@ builtin_get_char(Variable *locs, Expression *procexpr, Expression *args)
 Value
 builtin_random(Variable *locs, Expression *procexpr, Expression *args)
 {
-	static int64_t defstate = 0;
+	static i64 defstate = 0;
 
 	Value v = {0};
 	Variable *var = NULL;
 	Statement *params;
-	int64_t seed;
+	i64 seed;
 
 	params = make_param("seed", NULL);
 	var = eval_args(locs, params, procexpr, args);
@@ -1767,32 +1758,30 @@ builtin_assert(Variable *locs, Expression *procexpr, Expression *args)
 	return v;
 }
 
-int
-push_word(Token *t, int64_t x)
+u32
+push_word(Token *t, i64 x)
 {
-	int addr;
+	u32 addr;
 
 	if (words_top >= WORDS_SIZE)
 		eval_die(t, "word stack overflow");
 	addr = words_top++;
-	assert(addr >= 0);
 	assert(addr < WORDS_SIZE);
 	assert(!words[addr]);
 	words[addr] = x;
 	return addr;
 }
 
-int
-push_arr(Token *t, int n)
+u32
+push_arr(Token *t, i64 n)
 {
-	int addr, i;
+	u32 addr, i;
 
 	if (n < 1)
-		eval_die(t, "array size < 1 (%d)", n);
+		eval_die(t, "array size is less than one: %"PRIi64"", n);
 	if (words_top + n >= WORDS_SIZE)
-		eval_die(t, "word stack overflow: array is too large (%d)", n);
+		eval_die(t, "word stack overflow: array is too large (%"PRIi64")", n);
 	addr = words_top;
-	assert(addr >= 0);
 	assert(addr < WORDS_SIZE);
 	for (i = addr; i < addr + n; ++i)
 		assert(!words[i]);
@@ -1821,7 +1810,7 @@ eval_args(Variable *locs, Statement *params, Expression *procexpr, Expression *a
 	Variable *calleelocs = NULL, *var;
 	Statement *par;
 	Expression *arg;
-	int paramcount = 0;
+	u32 paramcount = 0;
 
 	for (par = params, arg = args; par; par = par->next) {
 		var = alloc(&eval_alloc, sizeof(Variable));
@@ -1840,7 +1829,7 @@ eval_args(Variable *locs, Statement *params, Expression *procexpr, Expression *a
 		++paramcount;
 	}
 	if (arg)
-		eval_die(&procexpr->tok, "cannot pass more than %d argument(s) to `%s`",
+		eval_die(&procexpr->tok, "cannot pass more than %"PRIu32" argument(s) to `%s`",
 			 paramcount, procexpr->tok.name);
 	return calleelocs;
 }
@@ -1852,8 +1841,8 @@ eval_call(Variable *locs, Expression *e)
 	Procedure *proc;
 	Expression *procexpr;
 	const char *procname;
-	int i;
-	int prev_words_top;
+	u32 i;
+	u32 prev_words_top;
 	char *prev_eval_top;
 
 	assert(e->tag == EXPR_CALL);
@@ -1879,7 +1868,7 @@ eval_call(Variable *locs, Expression *e)
 	/* call */
 	v = eval_stmt(eval_args(locs, proc->params, procexpr, e->right), proc->body); DEREF(v);
 cleanup:
-	memset(prev_eval_top, 0, (size_t)(eval_alloc.top - prev_eval_top));
+	memset(prev_eval_top, 0, eval_alloc.top - prev_eval_top);
 	memset(words + prev_words_top, 0, sizeof(words[0]) * (words_top - prev_words_top));
 	eval_alloc.top = prev_eval_top;
 	words_top = prev_words_top;
@@ -1887,13 +1876,13 @@ cleanup:
 }
 
 Value
-eval_expr(Variable *locs, Expression *e, int constex)
+eval_expr(Variable *locs, Expression *e, u32 constex)
 {
 	Value v = {0}, w = {0};
 	Variable *var;
 	union typepunning {
-		uint64_t u;
-		int64_t i;
+		u64 u;
+		i64 i;
 	} tp;
 
 	switch (e->tag) {
@@ -1913,7 +1902,7 @@ eval_expr(Variable *locs, Expression *e, int constex)
 		if (!v.deref)
 			eval_die(&e->tok, "cannot subscript non-variable");
 		assert(v.i >= 0 && v.i < WORDS_SIZE);
-		tp.u = (uint64_t)words[v.i] + (uint64_t)w.i;
+		tp.u = (u64)words[v.i] + (u64)w.i;
 		if (tp.i < 0 || tp.i >= WORDS_SIZE)
 			eval_die(&e->tok, "out of bounds word access (%"PRId64")", tp.i);
 		v.i = tp.i;
@@ -1979,27 +1968,27 @@ eval_expr(Variable *locs, Expression *e, int constex)
 		if (v.i == INT64_MIN && w.i == -1) {
 			v.i = INT64_MIN;
 		} else {
-			tp.u = (uint64_t)v.i * (uint64_t)w.i;
+			tp.u = (u64)v.i * (u64)w.i;
 			v.i = tp.i;
 		}
 		break;
 	case EXPR_SUB:
 		v = eval_expr(locs, e->left, constex); DEREF(v);
 		w = eval_expr(locs, e->right, constex); DEREF(w);
-		tp.u = (uint64_t)v.i - (uint64_t)w.i;
+		tp.u = (u64)v.i - (u64)w.i;
 		v.i = tp.i;
 		break;
 	case EXPR_ADD:
 		v = eval_expr(locs, e->left, constex); DEREF(v);
 		w = eval_expr(locs, e->right, constex); DEREF(w);
-		tp.u = (uint64_t)v.i + (uint64_t)w.i;
+		tp.u = (u64)v.i + (u64)w.i;
 		v.i = tp.i;
 		break;
 	case EXPR_BIT_SH_R:
 		v = eval_expr(locs, e->left, constex); DEREF(v);
 		w = eval_expr(locs, e->right, constex); DEREF(w);
 		if (w.i >= 0 && w.i <= 63) {
-			tp.u = (uint64_t)v.i >> (uint64_t)w.i;
+			tp.u = (u64)v.i >> (u64)w.i;
 			v.i = tp.i;
 		} else {
 			v.i = 0;
@@ -2009,7 +1998,7 @@ eval_expr(Variable *locs, Expression *e, int constex)
 		v = eval_expr(locs, e->left, constex); DEREF(v);
 		w = eval_expr(locs, e->right, constex); DEREF(w);
 		if (w.i >= 0 && w.i <= 63) {
-			tp.u = (uint64_t)v.i << (uint64_t)w.i;
+			tp.u = (u64)v.i << (u64)w.i;
 			v.i = tp.i;
 		} else {
 			v.i = 0;
@@ -2162,18 +2151,19 @@ eval_stmt(Variable *locs, Statement *stmt)
 }
 
 int
-eval(int argc, char **argv)
+eval(u32 argc, char **argv)
 {
 	Value v = {0};
 	Variable *locs = NULL, *gvar;
 	Procedure *mainproc;
 	Statement *gdecl;
-	int i, j, off = 0;
-	int argc_off;
-	int prev_words_top;
+	u32 i, j, off = 0;
+	u32 argc_off;
+	u32 prev_words_top;
 	char *prev_eval_top;
 	clock_t clkbeg, clkend;
 
+	assert(argc >= 1);
 	debuglog(__LINE__, "evaluating...");
 	mainproc = get_proc(ast.procs, "main");
 	if (!mainproc)
@@ -2225,8 +2215,8 @@ eval(int argc, char **argv)
 		locs->next->addr = argc_off + 1;
 		words[locs->next->addr] = argc_off + 2;
 	}
-	if (debug && mainproc->params) {
-		debuglog(__LINE__, "words[%d..]: (each word truncated by 1 byte)", prev_words_top);
+	if (debug) { /* print state before main() */
+		debuglog(__LINE__, "words[%"PRIu32"..]: (each word truncated by 1 byte)", prev_words_top);
 		for (i = prev_words_top; words[i] || words[i + 1] || i < off; ++i) {
 			printf("%02x ", (unsigned int)(words[i] & 255));
 			if ((i + 1) % 16 == 0)
@@ -2245,10 +2235,21 @@ eval(int argc, char **argv)
 	if (debug) {
 		clkend = clock();
 		debuglog(__LINE__, "main() returned %"PRId64" (0x%"PRIx64"); cputime = %"PRIu64" ms",
-			 v.i, (uint64_t)v.i, (uint64_t)(clkend - clkbeg) * 1000 / CLOCKS_PER_SEC);
+			 v.i, (u64)v.i, (u64)(clkend - clkbeg) * 1000 / CLOCKS_PER_SEC);
+	}
+	if (debug) { /* print state after main() */
+		debuglog(__LINE__, "words[%"PRIu32"..]: (each word truncated by 1 byte)", prev_words_top);
+		for (i = prev_words_top; words[i] || words[i + 1] || i < off; ++i) {
+			printf("%02x ", (unsigned int)(words[i] & 255));
+			if ((i + 1) % 16 == 0)
+				putchar('\n');
+			else if ((i + 1) % 8 == 0)
+				putchar(' ');
+		}
+		printf("%02x\n", (unsigned int)(words[i] & 255));
 	}
 	/* final cleanup */
-	memset(prev_eval_top, 0, (size_t)(eval_alloc.top - prev_eval_top));
+	memset(prev_eval_top, 0, eval_alloc.top - prev_eval_top);
 	memset(words + prev_words_top, 0, sizeof(words[0]) * (words_top - prev_words_top));
 	eval_alloc.top = prev_eval_top;
 	words_top = prev_words_top;

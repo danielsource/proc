@@ -1,4 +1,4 @@
-proc (work-in-progress)
+proc
 ====
 
 
@@ -47,11 +47,11 @@ proc fibonacci(n, mem) { # Arguments are passed by value (mem is a pointer)
 }
 
 # Builtins:
-#   x = StrToInt(digits)        (exits on error)
-#   err = PutInt(n, no_newline) (-1 on error)
-#   err = PutHex(n, no_newline) (-1 on error)
-#   err = PutChar(c)            (-1 on error)
-#   c = GetChar()               (-1 on error)
+#   x = StrToInt(digits)                  (exits on error)
+#   err = PutInt(n, no_newline, zero_pad) (-1 on error)
+#   err = PutHex(n, no_newline, zero_pad) (-1 on error)
+#   err = PutChar(c)                      (-1 on error)
+#   c = GetChar()                         (-1 on error)
 #   x = Rand(seed)
 #   Exit(code)
 #   Assert(expression)
